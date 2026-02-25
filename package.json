@@ -1,0 +1,61 @@
+{
+  "name": "color-inspector",
+  "displayName": "color-inspector",
+  "description": "Scans the active file and its relative imports to detect and visualize all color references.",
+  "version": "0.0.1",
+  "publisher": "rod clemen",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "color-inspector.scan",
+        "title": "Color Inspector: Refresh"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "colorInspector",
+          "title": "Color Inspector",
+          "icon": "media/palette.svg"
+        }
+      ]
+    },
+    "views": {
+      "colorInspector": [
+        {
+          "icon": "media/palette.svg",
+          "id": "colorInspector.view",
+          "name": "Color Inspector",
+          "type": "webview"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "20.x",
+    "@vscode/test-electron": "^2.5.2",
+    "eslint": "^9.19.0",
+    "typescript": "^5.7.3"
+  }
+}

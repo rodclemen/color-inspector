@@ -1,0 +1,21 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "tsc: watch",
+      "type": "shell",
+      "command": "npx",
+      "args": ["tsc", "-watch", "-p", "."],
+      "problemMatcher": "$tsc-watch",
+      "isBackground": true,
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    }
+  ]
+}
