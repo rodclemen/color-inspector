@@ -1,9 +1,18 @@
 {
+  "repository": {
+  "type": "git",
+  "url": "https://github.com/rodclemen/color-inspector.git"
+},
+  "homepage": "https://github.com/rodclemen/color-inspector",
+  "bugs": {
+  "url": "https://github.com/rodclemen/color-inspector/issues"
+},
+  "license": "MIT",
   "name": "color-inspector",
   "displayName": "color-inspector",
   "description": "Scans the active file and its relative imports to detect and visualize all color references.",
   "version": "0.0.1",
-  "publisher": "rod clemen",
+  "publisher": "rodclemen",
   "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.80.0"
