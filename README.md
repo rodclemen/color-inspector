@@ -6,7 +6,10 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Early Development](https://img.shields.io/badge/status-early--development-orange)
 ![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)
-
+![Visual Studio Marketplace Version](https://img.shields.io/visual-studio-marketplace/v/rodclemen.color-inspector)
+![Visual Studio Marketplace Installs](https://img.shields.io/visual-studio-marketplace/i/rodclemen.color-inspector)
+![Visual Studio Marketplace Rating](https://img.shields.io/visual-studio-marketplace/r/rodclemen.color-inspector)
+![Visual Studio Marketplace Downloads](https://img.shields.io/visual-studio-marketplace/d/rodclemen.color-inspector)
 A focused VS Code extension that scans the active file and its explicit imports to find and organize color usage.
 
 No guessing. No magic crawling. Just what you actually imported.
