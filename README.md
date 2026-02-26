@@ -2,7 +2,6 @@
 
 > 🚧 Early development. Contributions welcome.
 
-![Version](https://img.shields.io/badge/version-0.0.1-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Early Development](https://img.shields.io/badge/status-early--development-orange)
 ![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)
@@ -10,7 +9,7 @@
 ![Visual Studio Marketplace Installs](https://img.shields.io/visual-studio-marketplace/i/rodclemen.color-inspector)
 ![Visual Studio Marketplace Rating](https://img.shields.io/visual-studio-marketplace/r/rodclemen.color-inspector)
 ![Visual Studio Marketplace Downloads](https://img.shields.io/visual-studio-marketplace/d/rodclemen.color-inspector)
-
+![Color Inspector banner](media/banner.png)
 
 Track down every color in your codebase (via explicit imports). Swatches, copy-paste, jump-to-line, and usage — in the sidebar.
 
