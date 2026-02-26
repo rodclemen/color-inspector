@@ -39,7 +39,11 @@
       {
         "command": "color-inspector.scan",
         "title": "Color Inspector: Refresh"
-      }
+      },
+      {
+        "command": "color-inspector.openSettings",
+        "title": "Color Inspector: Open Settings"
+}
     ],
     "viewsContainers": {
       "activitybar": [
@@ -51,6 +55,9 @@
       ]
     },
     "views": {
+
+      
+
       "colorInspector": [
         {
           "icon": "media/palette.svg",

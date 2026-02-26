@@ -810,6 +810,14 @@ export function activate(context: vscode.ExtensionContext) {
       await provider.render();
     })
   );
+
+  // Command: Open Settings
+  context.subscriptions.push(
+    vscode.commands.registerCommand("color-inspector.openSettings", async () => {
+      const extId = `${context.extension.packageJSON.publisher}.${context.extension.packageJSON.name}`;
+      await vscode.commands.executeCommand("workbench.action.openSettings", `@ext:${extId}`);
+    })
+  );
 }
 
 export function deactivate() {}
