@@ -19,7 +19,8 @@
   },
   "categories": [
     "Other",
-    "Themes"
+    "Linters",
+    "Visualization"
   ],
   "activationEvents": [],
   "main": "./out/extension.js",

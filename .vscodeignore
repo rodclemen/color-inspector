@@ -9,3 +9,7 @@ vsc-extension-quickstart.md
 **/*.map
 **/*.ts
 **/.vscode-test.*
+# local AI/tooling noise
+.claude/**
+.codex/**
+**/*.jsonl
