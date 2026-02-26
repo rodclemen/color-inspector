@@ -10,7 +10,7 @@
   "description": "Track down every color in your codebase (via explicit imports). Swatches, copy-paste, jump-to-line, and usage — in the sidebar.",
   "license": "MIT",
   "name": "color-inspector",
-  "displayName": "color-inspector",
+  "displayName": "Color Inspector",
   "version": "0.0.5",
   "publisher": "rodclemen",
   "icon": "media/icon.png",
@@ -84,20 +84,18 @@
     "typescript": "^5.9.3"
   },
   "keywords": [
-    "color",
-    "css",
-    "scss",
-    "sass",
-    "theming",
-    "design",
-    "ui",
-    "variables",
-    "css variables",
-    "hex",
-    "rgba",
+    "color", 
+    "colors", 
+    "css", 
+    "scss", 
+    "sass", 
+    "theming", 
+    "palette", 
+    "variables", 
+    "hex", 
+    "rgba", 
     "hsl",
-    "web development",
-    "frontend",
-    "sidebar"
-  ]
+    "rgb",
+    "linters"
+    ]
 }
