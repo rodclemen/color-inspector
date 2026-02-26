@@ -11,7 +11,7 @@
   "license": "MIT",
   "name": "color-inspector",
   "displayName": "color-inspector",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "rodclemen",
   "icon": "media/icon.png",
   "engines": {
@@ -43,7 +43,7 @@
       {
         "command": "color-inspector.openSettings",
         "title": "Color Inspector: Open Settings"
-}
+      }
     ],
     "viewsContainers": {
       "activitybar": [
@@ -55,9 +55,6 @@
       ]
     },
     "views": {
-
-      
-
       "colorInspector": [
         {
           "icon": "media/palette.svg",
