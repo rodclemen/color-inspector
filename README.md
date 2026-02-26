@@ -164,6 +164,11 @@ This project is in early development. The core workflow works, but there’s ple
 - Performance controls for large projects (limits, caching, incremental scan)
 - More color formats (edge cases) and better parsing of gradients
 - UI polish: smoother expand/collapse, better density controls
+### Theme awareness
+### Theme awareness
+- Current: Theme grouping applies to CSS variable definitions (`--var: ...;`) only
+- Planned: Expand theme grouping to all color literals and usage locations
+
 
 ### Nice-to-have
 - Export palette (JSON / CSS vars / ASE)
