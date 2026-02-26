@@ -7,7 +7,7 @@
   "bugs": {
     "url": "https://github.com/rodclemen/color-inspector/issues"
   },
-  "description": "A focused color usage inspector for VS Code. Follows your imports. Shows where colors actually live. No magic. No guessing.",
+  "description": "Track down every color in your codebase (via explicit imports). Swatches, copy-paste, jump-to-line, and usage — in the sidebar.",
   "license": "MIT",
   "name": "color-inspector",
   "displayName": "color-inspector",
@@ -18,7 +18,8 @@
     "vscode": "^1.80.0"
   },
   "categories": [
-    "Other"
+    "Other",
+    "Themes"
   ],
   "activationEvents": [],
   "main": "./out/extension.js",
@@ -50,14 +51,14 @@
         {
           "id": "colorInspector",
           "title": "Color Inspector",
-          "icon": "media/palette.svg"
+          "icon": "media/icon.svg"
         }
       ]
     },
     "views": {
       "colorInspector": [
         {
-          "icon": "media/palette.svg",
+          "icon": "media/icon.svg",
           "id": "colorInspector.view",
           "name": "Color Inspector",
           "type": "webview"
@@ -80,5 +81,22 @@
     "@vscode/test-electron": "^2.5.2",
     "eslint": "^9.19.0",
     "typescript": "^5.9.3"
-  }
+  },
+  "keywords": [
+  "color",
+  "css",
+  "scss",
+  "sass",
+  "theming",
+  "design",
+  "ui",
+  "variables",
+  "css variables",
+  "hex",
+  "rgba",
+  "hsl",
+  "web development",
+  "frontend",
+  "sidebar"
+]
 }
