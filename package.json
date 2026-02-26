@@ -1,17 +1,16 @@
 {
   "repository": {
-  "type": "git",
-  "url": "https://github.com/rodclemen/color-inspector.git"
-},
+    "type": "git",
+    "url": "https://github.com/rodclemen/color-inspector.git"
+  },
   "homepage": "https://github.com/rodclemen/color-inspector",
   "bugs": {
-  "url": "https://github.com/rodclemen/color-inspector/issues"
-},
-  "description": "A focused color usage inspector for VS Code. Follows your imports. Shows where colors actually live. No magic. No guessing."
+    "url": "https://github.com/rodclemen/color-inspector/issues"
+  },
+  "description": "A focused color usage inspector for VS Code. Follows your imports. Shows where colors actually live. No magic. No guessing.",
   "license": "MIT",
   "name": "color-inspector",
   "displayName": "color-inspector",
-  "description": "Scans the active file and its relative imports to detect and visualize all color references.",
   "version": "0.0.1",
   "publisher": "rodclemen",
   "icon": "media/icon.png",
@@ -21,11 +20,23 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [
-    
-  ],
+  "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+    "title": "Color Inspector",
+    "properties": {
+      "colorInspector.autoScanMinutes": {
+        "type": "number",
+        "default": 0,
+        "minimum": 0,
+        "maximum": 10,
+        "description": "Auto-scan interval in minutes. 0 = Off. Range: 1–10."
+      }
+    }
+  },
+    
+    
     "commands": [
       {
         "command": "color-inspector.scan",
@@ -61,11 +72,11 @@
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/vscode": "^1.80.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "20.x",
+    "@types/vscode": "^1.80.0",
     "@vscode/test-electron": "^2.5.2",
     "eslint": "^9.19.0",
-    "typescript": "^5.7.3"
+    "typescript": "^5.9.3"
   }
 }

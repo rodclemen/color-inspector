@@ -1,8 +1,11 @@
 import * as vscode from "vscode";
 
-/* =========================================================
-   Types
-========================================================= */
+/**
+ * Color Inspector — extension.ts
+ *
+ * Manual scan by default.
+ * Optional auto-scan interval via setting: colorInspector.autoScanMinutes (0–10).
+ */
 
 type HitRange = {
   line: number; // 1-based
@@ -10,58 +13,32 @@ type HitRange = {
   endCol: number; // 0-based
 };
 
-type UsageInfo = {
-  isDefinition: boolean;
-  scope?: string; // CSS selector (.pair-card) OR JSX scope (.pair-card or div)
-  property?: string; // CSS property OR JS style key (border/background/boxShadow)
+type UsageHit = {
+  file: string; // workspace-relative
   line: number; // 1-based
+  scope: string; // ".pair-card", "div", etc.
+  prop: string; // "border", "background", "filter", etc.
+  sample: string; // trimmed line/sample
 };
 
-type ColorOccur =
+type ColorHit =
   | {
       kind: "var";
       name: string; // --border
-      value: string; // resolved color for swatch (hex/rgb/rgba/hsl/hsla)
-      file: string; // relative
+      value: string; // #aabbcc / rgba(...)
+      file: string;
       range: HitRange;
-      usage: UsageInfo;
+      usages: UsageHit[];
     }
   | {
       kind: "literal";
-      value: string;
+      value: string; // #aabbcc / rgba(...)
       file: string;
       range: HitRange;
-      usage: UsageInfo;
+      usages: UsageHit[];
     };
 
-type ColorEntry = {
-  key: string;
-  kind: "var" | "literal";
-  name?: string;
-  value: string;
-  occurrences: ColorOccur[];
-};
-
-type FileGroup = {
-  file: string;
-  entries: Array<{
-    entry: ColorEntry;
-    occurrencesInFile: ColorOccur[];
-  }>;
-  uniqueCount: number;
-};
-
-type VarDef = { name: string; value: string };
-
-/* =========================================================
-   Workspace setting key
-========================================================= */
-
 const WS_KEY_ALLOW_SPACE = "colorInspector.allowAutoSpaceForHex";
-
-/* =========================================================
-   Confirm: auto-insert space before # in var definitions
-========================================================= */
 
 async function confirmAutoSpaceIfNeeded(
   workspaceState: vscode.Memento,
@@ -100,41 +77,53 @@ async function confirmAutoSpaceIfNeeded(
   return "deny";
 }
 
-/* =========================================================
-   Webview Provider
-========================================================= */
-
 class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "colorInspector.view";
   private view?: vscode.WebviewView;
 
-  constructor(private readonly workspaceState: vscode.Memento) {}
+  // Manual-first UX
+  private hasScanned = false;
+
+  // Autoscan
+  private autoScanTimer: NodeJS.Timeout | undefined;
+
+  // Last scan info for header + import list
+  private lastRootRel = "";
+  private lastTotalColors = 0;
+  private lastImportCount = 0;
+  private lastImportFiles: { file: string; colors: number }[] = [];
+
+  constructor(private readonly context: vscode.ExtensionContext) {}
 
   resolveWebviewView(webviewView: vscode.WebviewView) {
     this.view = webviewView;
     webviewView.webview.options = { enableScripts: true };
 
     webviewView.webview.onDidReceiveMessage(async (msg) => {
-      if (msg?.type === "copy" && typeof msg.value === "string") {
+      if (!msg || typeof msg.type !== "string") {
+        return;
+      }
+
+      if (msg.type === "copy" && typeof msg.value === "string") {
         await vscode.env.clipboard.writeText(msg.value);
         vscode.window.showInformationMessage(`${msg.value} copied`);
         return;
       }
 
-      if (msg?.type === "open" && typeof msg.file === "string" && typeof msg.line === "number") {
+      if (msg.type === "open" && typeof msg.file === "string" && typeof msg.line === "number") {
         await openFileAtLine(msg.file, msg.line);
         return;
       }
 
       if (
-        msg?.type === "pickVscode" &&
+        msg.type === "pickVscode" &&
         typeof msg.file === "string" &&
         typeof msg.line === "number" &&
         typeof msg.startCol === "number" &&
         typeof msg.endCol === "number"
       ) {
         await openFileSelectRangeAndPickVscode(
-          this.workspaceState,
+          this.context.workspaceState,
           msg.file,
           msg.line,
           msg.startCol,
@@ -143,13 +132,77 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
         return;
       }
 
-      if (msg?.type === "refresh") {
+      if (msg.type === "refresh") {
+        this.hasScanned = true;
         await this.render();
+        return;
+      }
+
+      if (msg.type === "toggleImports") {
+        // Purely UI-side; no action needed.
+        return;
+      }
+
+      if (msg.type === "openSettings") {
+        await vscode.commands.executeCommand(
+          "workbench.action.openSettings",
+          "@ext:rodclemen.color-inspector"
+        );
         return;
       }
     });
 
-    void this.render();
+    // Initial idle UI (NO auto-scan on open)
+    webviewView.webview.html = this.htmlIdle();
+
+    // Start auto-scan timer if enabled
+    this.restartAutoScanFromSettings();
+
+    // Restart timer when setting changes
+    const cfgSub = vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("colorInspector.autoScanMinutes")) {
+        this.restartAutoScanFromSettings();
+      }
+    });
+
+    // Cleanup
+    webviewView.onDidDispose(() => {
+      this.stopAutoScan();
+      cfgSub.dispose();
+    });
+  }
+
+  private stopAutoScan() {
+    if (this.autoScanTimer) {
+      clearInterval(this.autoScanTimer);
+      this.autoScanTimer = undefined;
+    }
+  }
+
+  private restartAutoScanFromSettings() {
+    this.stopAutoScan();
+
+    const mins = vscode.workspace.getConfiguration().get<number>("colorInspector.autoScanMinutes", 0);
+    if (!mins || mins <= 0) {
+      return;
+    }
+    const clamped = Math.max(1, Math.min(10, Math.floor(mins)));
+    const ms = clamped * 60 * 1000;
+
+    this.autoScanTimer = setInterval(() => {
+      // Only scan if we have an active editor and the view exists
+      if (!this.view) {
+        return;
+      }
+      if (!vscode.window.activeTextEditor) {
+        return;
+      }
+      // Only auto-scan after the user has scanned at least once (avoids surprise work)
+      if (!this.hasScanned) {
+        return;
+      }
+      void this.render();
+    }, ms);
   }
 
   public async render() {
@@ -159,50 +212,27 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
 
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
-      this.view.webview.html = this.html({
-        headerPath: "No active editor",
-        totalColors: 0,
-        importFiles: [],
-        importCounts: new Map<string, number>(),
-        groups: [],
-      });
+      this.view.webview.html = this.htmlIdle("No active editor. Open a file, then press Scan.");
       return;
     }
 
     const folders = vscode.workspace.workspaceFolders;
     if (!folders || folders.length === 0) {
-      this.view.webview.html = this.html({
-        headerPath: "No workspace folder open",
-        totalColors: 0,
-        importFiles: [],
-        importCounts: new Map<string, number>(),
-        groups: [],
-      });
+      this.view.webview.html = this.htmlIdle("No workspace folder open.");
       return;
     }
-
     const wsRoot = folders[0].uri;
+
     const rootDoc = editor.document;
     const rootUri = rootDoc.uri;
 
-    // Only explicit imports
-    const uris = await collectImportGraph(rootUri, wsRoot, 120);
+    // Hard stop: follow ONLY explicit imports
+    const uris = await collectImportGraph(rootUri, wsRoot, 160);
 
-    const rootRelPath = vscode.workspace.asRelativePath(rootUri, false);
-    const rootFolderName = wsRoot.path.split("/").filter(Boolean).pop() ?? "workspace";
-    const headerPath = `${rootFolderName}/${rootRelPath}`;
+    // Scan all files
+    const allHits: ColorHit[] = [];
+    const perFileColorCounts = new Map<string, number>();
 
-    // Imports (exclude root)
-    const importFiles = uris
-      .slice(1)
-      .map((u) => vscode.workspace.asRelativePath(u, false))
-      .sort((a, b) => a.localeCompare(b));
-
-    // Cache file text + line starts
-    const fileTextCache = new Map<string, { text: string; lineStarts: number[] }>();
-
-    // Pass 1: collect var definitions across graph so var(--x) can resolve
-    const globalVarValueByName = new Map<string, string>(); // "--border" -> "#aabbcc"
     for (const uri of uris) {
       let text = "";
       try {
@@ -210,240 +240,214 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
       } catch {
         continue;
       }
+
       const fileLabel = vscode.workspace.asRelativePath(uri, false);
       const lineStarts = buildLineStartIndex(text);
-      fileTextCache.set(fileLabel, { text, lineStarts });
 
-      const defs = scanVarDefinitions(text);
-      for (const d of defs) {
-        if (!globalVarValueByName.has(d.name)) {
-          globalVarValueByName.set(d.name, d.value);
+      const hits = scanTextForColorsAndUsages(text, lineStarts, fileLabel);
+      allHits.push(...hits);
+
+      perFileColorCounts.set(fileLabel, (perFileColorCounts.get(fileLabel) ?? 0) + hits.length);
+    }
+
+    // De-dupe across files:
+    const varSeen = new Set<string>();
+    const litSeen = new Set<string>();
+    const merged: ColorHit[] = [];
+
+    for (const h of allHits) {
+      const normVal = normalizeColorKey(h.value);
+      if (h.kind === "var") {
+        const key = `${h.file}|${h.name}=${normVal}`.toLowerCase();
+        if (!varSeen.has(key)) {
+          varSeen.add(key);
+          merged.push(h);
+        }
+      } else {
+        const key = `${h.file}|${normVal}`.toLowerCase();
+        if (!litSeen.has(key)) {
+          litSeen.add(key);
+          merged.push(h);
         }
       }
     }
 
-    // Pass 2: scan occurrences
-    const occByFile = new Map<string, ColorOccur[]>();
-    for (const [fileLabel, cached] of fileTextCache.entries()) {
-      const occ = scanTextForColorOccurrences(
-        cached.text,
-        cached.lineStarts,
-        fileLabel,
-        globalVarValueByName
-      );
-      occByFile.set(fileLabel, occ);
-    }
-
-    // Aggregate into unique entries, keep occurrences
-    const entriesByKey = new Map<string, ColorEntry>();
-    for (const arr of occByFile.values()) {
-      for (const o of arr) {
-        const key = makeColorKey(o);
-        const existing = entriesByKey.get(key);
-        if (!existing) {
-          entriesByKey.set(key, {
-            key,
-            kind: o.kind,
-            name: o.kind === "var" ? o.name : undefined,
-            value: o.value,
-            occurrences: [o],
-          });
-        } else {
-          existing.occurrences.push(o);
+    // Group by file (in UI)
+    merged.sort((a, b) => {
+      const f = a.file.localeCompare(b.file);
+      if (f !== 0) {
+        return f;
+      }
+      if (a.kind !== b.kind) {
+        return a.kind === "var" ? -1 : 1;
+      }
+      if (a.kind === "var" && b.kind === "var") {
+        const n = a.name.localeCompare(b.name);
+        if (n !== 0) {
+          return n;
         }
       }
-    }
-
-    const allEntries = Array.from(entriesByKey.values());
-    const totalColors = allEntries.length;
-
-    // Unique keys per file (for grouping + import counts)
-    const uniqueKeysPerFile = new Map<string, Set<string>>();
-    for (const e of allEntries) {
-      for (const o of e.occurrences) {
-        const set = uniqueKeysPerFile.get(o.file) ?? new Set<string>();
-        set.add(e.key);
-        uniqueKeysPerFile.set(o.file, set);
+      const v = a.value.localeCompare(b.value);
+      if (v !== 0) {
+        return v;
       }
-    }
-
-    // Import counts = unique colors in each import file
-    const importCounts = new Map<string, number>();
-    for (const f of importFiles) {
-      importCounts.set(f, uniqueKeysPerFile.get(f)?.size ?? 0);
-    }
-
-    // File groups (root first, then alpha)
-    const fileList = Array.from(uniqueKeysPerFile.keys()).sort((a, b) => {
-      if (a === rootRelPath && b !== rootRelPath) {
-        return -1;
-      }
-      if (b === rootRelPath && a !== rootRelPath) {
-        return 1;
-      }
-      return a.localeCompare(b);
+      return a.range.line - b.range.line;
     });
 
-    const groups: FileGroup[] = fileList.map((file) => {
-      const keys = uniqueKeysPerFile.get(file) ?? new Set<string>();
+    // Header: workingfolder/path | xx colors | +N Import(s)
+    const rootRel = vscode.workspace.asRelativePath(rootDoc.uri, false);
+    const totalColors = merged.length;
+    const importCount = Math.max(0, uris.length - 1);
 
-      const entriesForFile = Array.from(keys)
-        .map((k) => entriesByKey.get(k)!)
-        .filter(Boolean)
-        .map((entry) => {
-          const occurrencesInFile = entry.occurrences
-            .filter((o) => o.file === file)
-            .sort((a, b) => a.usage.line - b.usage.line);
-          return { entry, occurrencesInFile };
-        })
-        .sort((a, b) => {
-          if (a.entry.kind !== b.entry.kind) {
-            return a.entry.kind === "var" ? -1 : 1;
-          }
-          if (a.entry.kind === "var" && b.entry.kind === "var") {
-            return (a.entry.name ?? "").localeCompare(b.entry.name ?? "");
-          }
-          return a.entry.value.localeCompare(b.entry.value);
-        });
+    const importFiles: { file: string; colors: number }[] = [];
+    for (const uri of uris) {
+      const fileLabel = vscode.workspace.asRelativePath(uri, false);
+      if (fileLabel === rootRel) {
+        continue;
+      }
+      importFiles.push({ file: fileLabel, colors: perFileColorCounts.get(fileLabel) ?? 0 });
+    }
 
-      return { file, entries: entriesForFile, uniqueCount: entriesForFile.length };
-    });
+    this.lastRootRel = rootRel;
+    this.lastTotalColors = totalColors;
+    this.lastImportCount = importCount;
+    this.lastImportFiles = importFiles;
 
-    this.view.webview.html = this.html({
-      headerPath,
-      totalColors,
-      importFiles,
-      importCounts,
-      groups,
+    this.view.webview.html = this.htmlMain(merged);
+  }
+
+  private htmlIdle(message?: string): string {
+    const msg = message ?? "Ready. Press Scan to start.";
+    return this.htmlShell({
+      headerLeft: escapeHtml(`Color Inspector`),
+      headerMid: escapeHtml(msg),
+      headerRight: "",
+      imports: [],
+      groups: [],
+      buttonLabel: "Scan",
+      showImportsToggle: false,
+      autoScanMinutes: vscode.workspace.getConfiguration().get<number>("colorInspector.autoScanMinutes", 0),
     });
   }
 
-  private html(args: {
-    headerPath: string;
-    totalColors: number;
-    importFiles: string[];
-    importCounts: Map<string, number>;
-    groups: FileGroup[];
-  }) {
-    const { headerPath, totalColors, importFiles, importCounts, groups } = args;
+  private htmlMain(colors: ColorHit[]): string {
+    const importCount = this.lastImportCount;
+    const importLabel = importCount === 1 ? "Import" : "Imports";
+    const importsClickable = importCount > 0;
 
-    const escapeHtml = (s: string) =>
-      s.replace(/[&<>"']/g, (ch) => {
-        const map: Record<string, string> = {
-          "&": "&amp;",
-          "<": "&lt;",
-          ">": "&gt;",
-          '"': "&quot;",
-          "'": "&#39;",
-        };
-        return map[ch] ?? ch;
+    const headerLeft = escapeHtml(this.lastRootRel);
+    const headerMid = escapeHtml(`${this.lastTotalColors} colors`);
+    const headerRight = importCount > 0 ? escapeHtml(`+${importCount} ${importLabel}`) : escapeHtml(`+0 Imports`);
+
+    // Group by file
+    const byFile = new Map<string, ColorHit[]>();
+    for (const c of colors) {
+      const arr = byFile.get(c.file) ?? [];
+      arr.push(c);
+      byFile.set(c.file, arr);
+    }
+
+    const groups = Array.from(byFile.entries()).map(([file, hits]) => {
+      // Sort within group: vars first, then literals, then line
+      hits.sort((a, b) => {
+        if (a.kind !== b.kind) {
+          return a.kind === "var" ? -1 : 1;
+        }
+        if (a.kind === "var" && b.kind === "var") {
+          const n = a.name.localeCompare(b.name);
+          if (n !== 0) {
+            return n;
+          }
+        }
+        const v = a.value.localeCompare(b.value);
+        if (v !== 0) {
+          return v;
+        }
+        return a.range.line - b.range.line;
       });
 
-    const importCount = importFiles.length;
-    const importWord = importCount === 1 ? "Import" : "Imports";
+      return {
+        file,
+        count: hits.length,
+        hits,
+      };
+    });
 
-    const importsButton =
-      importCount > 0
-        ? `<button id="importsToggle" class="importsBtn" aria-expanded="false" title="Show imported files">+${importCount} ${importWord}</button>`
-        : `<span class="importsOff">+0 Imports</span>`;
+    // Root file group first
+    groups.sort((a, b) => {
+      if (a.file === this.lastRootRel) return -1;
+      if (b.file === this.lastRootRel) return 1;
+      return a.file.localeCompare(b.file);
+    });
 
-    const importsPanel =
-      importCount > 0
-        ? `<div id="importsPanel" class="importsPanel" hidden>
-            ${importFiles
-              .map((p) => {
-                const c = importCounts.get(p) ?? 0;
-                return `<div class="importLine">${escapeHtml(p)} <span class="importCount">(${c})</span></div>`;
-              })
-              .join("")}
-           </div>`
-        : "";
+    const imports = this.lastImportFiles;
+
+    const buttonLabel = this.hasScanned ? "Refresh" : "Scan";
+    const autoScanMinutes = vscode.workspace.getConfiguration().get<number>("colorInspector.autoScanMinutes", 0);
+
+    return this.htmlShell({
+      headerLeft,
+      headerMid,
+      headerRight,
+      imports,
+      groups,
+      buttonLabel,
+      showImportsToggle: importsClickable,
+      autoScanMinutes,
+    });
+  }
+
+  private htmlShell(args: {
+    headerLeft: string;
+    headerMid: string;
+    headerRight: string;
+    imports: { file: string; colors: number }[];
+    groups: { file: string; count: number; hits: ColorHit[] }[];
+    buttonLabel: string;
+    showImportsToggle: boolean;
+    autoScanMinutes: number;
+  }): string {
+    const importsRows =
+      args.imports.length === 0
+        ? ""
+        : args.imports
+            .map((i) => `<div class="importRow">${escapeHtml(i.file)} <span class="muted">(${i.colors})</span></div>`)
+            .join("");
 
     const groupsHtml =
-      groups.length === 0
+      args.groups.length === 0
         ? `<div class="empty">No colors found.</div>`
-        : groups
+        : args.groups
             .map((g) => {
-              const fileTitle = `${g.file} (${g.uniqueCount})`;
-
-              const rows = g.entries
-                .map(({ entry, occurrencesInFile }) => {
-                  // Pick a primary occurrence for jump/caret (prefer non-definition)
-                  const nonDef = occurrencesInFile.find((o) => !o.usage.isDefinition);
-                  const primary = nonDef ?? occurrencesInFile[0];
-                  const line = primary?.usage.line ?? 1;
-
-                  // Expanded details: only usages (not definitions)
-                  const usageOcc = occurrencesInFile.filter((o) => !o.usage.isDefinition);
-
-                  const details = usageOcc
-                    .map((o) => {
-                      const scope = o.usage.scope ?? "(unknown)";
-                      const prop = o.usage.property ?? "(unknown)";
-                      return `
-<div class="useRow" role="button" tabindex="0"
-     data-file="${escapeHtml(o.file)}"
-     data-line="${o.usage.line}">
-  <div class="useMain">
-    <div class="useLeft"><span class="useScope">${escapeHtml(scope)}</span> • <span class="useProp">${escapeHtml(
-                        prop
-                      )}</span></div>
-  </div>
-  <div class="useLine">Line ${o.usage.line}</div>
-</div>`;
-                    })
-                    .join("");
-
-                  const labelBlock =
-                    entry.kind === "var"
-                      ? `<div class="metaRow"><span class="metaKey">Label:</span> <span class="metaVal">${escapeHtml(
-                          entry.name ?? ""
-                        )}</span></div>`
-                      : "";
-
-                  return `
-<div class="row"
-     role="button"
-     tabindex="0"
-     data-file="${escapeHtml(g.file)}"
-     data-line="${line}"
-     data-startcol="${primary?.range.startCol ?? 0}"
-     data-endcol="${primary?.range.endCol ?? 0}"
-     data-value="${escapeHtml(entry.value)}">
-
-  <button class="swatchBtn" title="Open VS Code color picker" aria-label="Open VS Code color picker">
-    <div class="swatch" style="background:${entry.value}"></div>
-  </button>
-
-  <div class="meta">
-    ${labelBlock}
-    <div class="metaRow"><span class="metaKey">Color:</span> <span class="metaVal mono">${escapeHtml(
-      entry.value
-    )}</span></div>
-    <div class="metaRow"><span class="metaKey">Line:</span> <span class="metaVal">${line}</span></div>
-  </div>
-
-  <button class="expandBtn" title="Show usages" aria-label="Show usages" aria-expanded="false">▾</button>
-  <button class="copy" title="Copy color" aria-label="Copy color">Copy</button>
-</div>
-<div class="details" hidden>
-  <div class="detailsInner">
-    ${details || `<div class="emptySmall">No usages found in this file.</div>`}
-  </div>
-</div>`;
-                })
-                .join("");
-
+              const rows = g.hits.map((c, idx) => this.renderColorRow(c, `${g.file}::${idx}`)).join("");
               return `
-<section class="group">
-  <div class="groupHeader">${escapeHtml(fileTitle)}</div>
-  <div class="groupBody">${rows}</div>
-</section>`;
+<div class="group">
+  <div class="groupHeader" title="${escapeHtml(g.file)}">${escapeHtml(g.file)} <span class="muted">(${g.count})</span></div>
+  <div class="groupBody">
+    ${rows}
+  </div>
+</div>`;
             })
             .join("");
 
-    const safeHeaderPath = escapeHtml(headerPath);
+    const importsToggle =
+      args.showImportsToggle && args.imports.length > 0
+        ? `<button id="importsToggle" class="importsToggle" title="Show imports">${args.headerRight}</button>`
+        : `<div class="importsStatic">${args.headerRight}</div>`;
 
+    const importPanel =
+      args.imports.length > 0
+        ? `<div id="importsPanel" class="importsPanel" style="display:none;">
+             ${importsRows}
+           </div>`
+        : "";
+
+    const autoScanInfo =
+      args.autoScanMinutes && args.autoScanMinutes > 0
+        ? `<div class="mutedSmall">Auto-scan: every ${Math.max(1, Math.min(10, Math.floor(args.autoScanMinutes)))} min</div>`
+        : `<div class="mutedSmall">Auto-scan: off</div>`;
+
+    // NOTE: using your requested theme vars/styles
     return `<!doctype html>
 <html>
 <head>
@@ -451,110 +455,91 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { color-scheme: light dark; }
-
-    body {
-      margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: var(--vscode-sideBar-background);
-      color: var(--vscode-sideBar-foreground);
-    }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 
     .top {
       display:flex;
-      flex-direction:column;
-      gap:8px;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
       padding:10px 10px 8px;
       border-bottom: 1px solid var(--vscode-sideBar-border);
       background: var(--vscode-sideBar-background);
     }
 
-    .topRow {
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap:10px;
-    }
-
-    .title {
-      font-size:12px;
-      opacity:.9;
-      overflow:hidden;
-      text-overflow:ellipsis;
-      white-space:nowrap;
-      flex: 1 1 auto;
-      min-width: 0;
-    }
-
-    .stats {
-      display:flex;
-      align-items:center;
-      gap:10px;
-      flex: 0 0 auto;
-      white-space:nowrap;
-      font-size:12px;
-      opacity:.9;
-    }
-
-    .sep { opacity: .5; }
-    .colorsCount { font-weight: 800; }
-
-    .importsBtn {
-      padding:0;
-      border:none;
-      background:transparent;
-      cursor:pointer;
-      font-size:12px;
-      font-weight:800;
-      color: var(--vscode-sideBar-foreground);
-    }
-    .importsBtn:hover { text-decoration: underline; }
-
-    .importsOff {
-      font-size:12px;
-      font-weight:800;
-      opacity:.35;
-      user-select:none;
-    }
-
-    .importsPanel {
-      padding:8px;
-      border-radius:10px;
-      border:1px solid var(--vscode-sideBar-border);
-      background: var(--vscode-editorWidget-background);
+    .topLeft {
       display:flex;
       flex-direction:column;
-      gap:6px;
-      max-height: 160px;
-      overflow:auto;
+      gap:2px;
+      min-width:0;
+      flex: 1 1 auto;
     }
 
-    .importLine {
-      font-size: 11px;
-      opacity: .92;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      white-space: nowrap;
-      overflow:hidden;
-      text-overflow: ellipsis;
+    .topLine {
       display:flex;
-      justify-content:space-between;
       gap:10px;
+      align-items:baseline;
+      min-width:0;
+      flex-wrap:wrap;
     }
 
-    .importCount { opacity: .7; flex: 0 0 auto; }
+    .titleLeft { font-size:12px; font-weight:700; opacity:.95; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width: 100%; }
+    .titleMid { font-size:12px; font-weight:700; opacity:.85; white-space:nowrap; }
+    .importsToggle {
+      font-size:12px;
+      font-weight:800;
+      color: var(--vscode-textLink-foreground);
+      background: transparent;
+      border: 0;
+      padding: 0;
+      cursor: pointer;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+    .importsStatic { font-size:12px; font-weight:800; opacity:.7; }
+
+    .muted { opacity: .75; font-weight: 600; }
+    .mutedSmall { font-size: 11px; opacity: .75; }
+
+    .topRight { display:flex; flex-direction:column; gap:6px; align-items:flex-end; }
 
     button { font: inherit; }
-
-    .refresh {
+    .actionBtn {
       padding:6px 10px;
       border-radius:8px;
-      border:1px solid var(--vscode-sideBar-border);
-      background: var(--vscode-button-secondaryBackground);
-      color: var(--vscode-button-secondaryForeground);
+      border:1px solid color-mix(in srgb, CanvasText 20%, transparent);
+      background: color-mix(in srgb, Canvas 92%, CanvasText 8%);
       cursor:pointer;
+      font-weight:700;
+      font-size:12px;
     }
-    .refresh:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    .actionBtn:hover {
+      background: color-mix(in srgb, Canvas 80%, CanvasText 20%);
+    }
 
-    /* ===== Your requested colors ===== */
+    .settingsBtn {
+      padding:4px 10px;
+      border-radius:8px;
+      border:1px solid color-mix(in srgb, CanvasText 12%, transparent);
+      background: transparent;
+      cursor:pointer;
+      font-size:11px;
+      opacity:.8;
+    }
+    .settingsBtn:hover { opacity: 1; }
+
+    .importsPanel {
+      padding: 10px 10px 6px;
+      border-bottom: 1px solid var(--vscode-sideBar-border);
+      background: var(--vscode-sideBar-background);
+    }
+    .importRow {
+      font-size: 12px;
+      padding: 4px 0;
+      border-bottom: 1px dashed color-mix(in srgb, CanvasText 12%, transparent);
+    }
+    .importRow:last-child { border-bottom: 0; }
+
     .content {
       padding: 10px;
       display: flex;
@@ -564,7 +549,6 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
     }
 
     .group { border:1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius:12px; overflow:hidden; }
-
     .groupHeader {
       padding: 8px 10px;
       font-size: 12px;
@@ -576,7 +560,6 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
       overflow: hidden;
       text-overflow: ellipsis;
     }
-
     .groupBody {
       padding: 10px;
       display: flex;
@@ -593,130 +576,112 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
       border-radius:10px;
       border:1px solid color-mix(in srgb, CanvasText 18%, transparent);
       cursor:pointer;
+      flex-wrap: wrap;
     }
-
     .row:hover {
       background: color-mix(in srgb, CanvasText 5%, transparent);
     }
-    /* ===== end ===== */
 
     .swatchBtn { padding:0; border:none; background:transparent; cursor:pointer; flex: 0 0 auto; }
-    .swatch { width: 50px; height: 50px; border-radius: 10px; border:1px solid color-mix(in srgb, CanvasText 18%, transparent); }
+    .swatch { width: 46px; height: 46px; border-radius: 10px; border:1px solid color-mix(in srgb, CanvasText 20%, transparent); }
 
-    .meta { display:flex; flex-direction:column; gap:4px; flex: 1 1 auto; min-width: 0; }
-    .metaRow { display:flex; gap:6px; align-items:baseline; }
-    .metaKey { font-size:11px; opacity:.7; min-width: 44px; }
-    .metaVal { font-size:12px; font-weight:800; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    .meta { display:flex; flex-direction:column; gap:2px; flex: 1 1 auto; min-width: 0; }
+    .label { font-size: 12px; font-weight: 800; opacity: .9; }
+    .value { font-weight: 650; font-size: 13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .line { font-size: 11px; opacity:.75; }
 
-    .expandBtn {
-      flex: 0 0 auto;
-      width: 34px;
-      height: 32px;
-      border-radius: 8px;
-      border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
-      background: color-mix(in srgb, CanvasText 5%, transparent);
-      color: inherit;
-      cursor: pointer;
+    .btnRow { display:flex; gap:8px; align-items:center; flex: 0 0 auto; }
+    .exp {
+      padding:6px 9px;
+      border-radius:8px;
+      border:1px solid color-mix(in srgb, CanvasText 20%, transparent);
+      background: color-mix(in srgb, Canvas 92%, CanvasText 8%);
+      cursor:pointer;
+      font-weight: 900;
       line-height: 1;
-      display:flex;
-      align-items:center;
-      justify-content:center;
     }
-    .expandBtn:hover { background: color-mix(in srgb, CanvasText 9%, transparent); }
-    .expandBtn.isOpen { transform: rotate(180deg); }
+    .exp:hover { background: color-mix(in srgb, Canvas 80%, CanvasText 20%); }
 
     .copy {
-      flex: 0 0 auto;
       padding:6px 10px;
       border-radius:8px;
-      border:1px solid color-mix(in srgb, CanvasText 18%, transparent);
-      background: color-mix(in srgb, CanvasText 5%, transparent);
+      border:1px solid color-mix(in srgb, CanvasText 20%, transparent);
+      background: color-mix(in srgb, Canvas 92%, CanvasText 8%);
       cursor:pointer;
-      color: inherit;
+      font-weight: 800;
     }
-    .copy:hover { background: color-mix(in srgb, CanvasText 9%, transparent); }
+    .copy:hover { background: color-mix(in srgb, Canvas 80%, CanvasText 20%); }
 
-    .details {
-      margin-top: -6px;
-      padding-left: 60px;
-    }
-    .detailsInner {
-      border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+    .expanded {
+      margin-top: 8px;
+      padding: 8px 10px;
       border-radius: 10px;
-      padding: 8px;
-      background: var(--vscode-editor-background);
-      display:flex;
-      flex-direction:column;
-      gap:6px;
+      border: 1px dashed color-mix(in srgb, CanvasText 18%, transparent);
+      background: color-mix(in srgb, CanvasText 3%, transparent);
+      display: none;
+      flex-direction: column;
+      gap: 6px;
+      flex: 1 1 100%;
+      width: 100%;
     }
-
     .useRow {
+      font-size: 12px;
+      line-height: 1.25;
       display:flex;
-      justify-content:space-between;
-      gap:10px;
-      padding:6px 8px;
-      border-radius:8px;
-      border:1px solid color-mix(in srgb, CanvasText 18%, transparent);
-      background: transparent;
-      cursor:pointer;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: baseline;
     }
-    .useRow:hover { background: color-mix(in srgb, CanvasText 5%, transparent); }
-
-    .useMain { display:flex; flex-direction:column; gap:2px; min-width:0; }
-    .useLeft {
-      font-size:11px;
-      font-weight:800;
-      opacity:.9;
-      overflow:hidden;
-      text-overflow:ellipsis;
-      white-space:nowrap;
-    }
-    .useScope { font-weight: 900; }
-    .useProp { font-weight: 900; }
-    .useLine { font-size:11px; opacity:.75; white-space:nowrap; flex: 0 0 auto; }
+    .useLeft { font-weight: 700; opacity: .95; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .useRight { opacity: .75; white-space:nowrap; }
+    .useSample { font-size: 11px; opacity: .8; white-space: nowrap; overflow:hidden; text-overflow:ellipsis; }
 
     .empty { padding: 10px; opacity: .75; }
-    .emptySmall { opacity: .7; font-size: 11px; padding: 4px 2px; }
   </style>
 </head>
 <body>
   <div class="top">
-    <div class="topRow">
-      <div class="title">${safeHeaderPath}</div>
-      <div class="stats">
-        <span class="colorsCount">${totalColors} colors</span>
-        <span class="sep">|</span>
-        ${importsButton}
+    <div class="topLeft">
+      <div class="topLine">
+        <div class="titleLeft">${args.headerLeft}</div>
+        <div class="titleMid">${args.headerMid}</div>
+        ${importsToggle}
       </div>
-      <div class="actions">
-        <button id="refresh" class="refresh" title="Refresh">Refresh</button>
-      </div>
+      ${autoScanInfo}
     </div>
-    ${importsPanel}
+
+    <div class="topRight">
+      <button id="refresh" class="actionBtn">${escapeHtml(args.buttonLabel)}</button>
+      <button id="openSettings" class="settingsBtn" title="Open settings">Settings</button>
+    </div>
   </div>
 
-  <div class="content">${groupsHtml}</div>
+  ${importPanel}
+
+  <div class="content">
+    ${groupsHtml}
+  </div>
 
   <script>
     const vscode = acquireVsCodeApi();
 
-    document.getElementById("refresh").addEventListener("click", () => {
+    const refreshBtn = document.getElementById("refresh");
+    refreshBtn.addEventListener("click", () => {
       vscode.postMessage({ type: "refresh" });
     });
 
-    const toggle = document.getElementById("importsToggle");
-    const panel = document.getElementById("importsPanel");
-    if (toggle && panel) {
-      toggle.addEventListener("click", () => {
-        const isHidden = panel.hasAttribute("hidden");
-        if (isHidden) {
-          panel.removeAttribute("hidden");
-          toggle.setAttribute("aria-expanded", "true");
-        } else {
-          panel.setAttribute("hidden", "");
-          toggle.setAttribute("aria-expanded", "false");
-        }
+    const settingsBtn = document.getElementById("openSettings");
+    settingsBtn.addEventListener("click", () => {
+      vscode.postMessage({ type: "openSettings" });
+    });
+
+    const importsToggle = document.getElementById("importsToggle");
+    const importsPanel = document.getElementById("importsPanel");
+    if (importsToggle && importsPanel) {
+      importsToggle.addEventListener("click", (e) => {
+        e.preventDefault();
+        const isOpen = importsPanel.style.display !== "none";
+        importsPanel.style.display = isOpen ? "none" : "block";
       });
     }
 
@@ -730,37 +695,11 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
       const open = () => vscode.postMessage({ type: "open", file, line });
       const pick = () => vscode.postMessage({ type: "pickVscode", file, line, startCol, endCol });
 
-      const details = row.nextElementSibling && row.nextElementSibling.classList.contains("details")
-        ? row.nextElementSibling
-        : null;
-
-      const expandBtn = row.querySelector(".expandBtn");
-      if (expandBtn && details) {
-        expandBtn.addEventListener("click", (e) => {
-          e.stopPropagation();
-          const hidden = details.hasAttribute("hidden");
-          if (hidden) {
-            details.removeAttribute("hidden");
-            expandBtn.classList.add("isOpen");
-            expandBtn.setAttribute("aria-expanded", "true");
-          } else {
-            details.setAttribute("hidden", "");
-            expandBtn.classList.remove("isOpen");
-            expandBtn.setAttribute("aria-expanded", "false");
-          }
-        });
-      }
-
       row.addEventListener("click", (e) => {
-        if (e.target && e.target.classList && e.target.classList.contains("copy")) {
-          return;
-        }
-        if (e.target && e.target.closest && e.target.closest(".swatchBtn")) {
-          return;
-        }
-        if (e.target && e.target.closest && e.target.closest(".expandBtn")) {
-          return;
-        }
+        const target = e.target;
+        if (target && target.closest && target.closest(".copy")) return;
+        if (target && target.closest && target.closest(".exp")) return;
+        if (target && target.closest && target.closest(".swatchBtn")) return;
         open();
       });
 
@@ -785,64 +724,99 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
           pick();
         });
       }
-    });
 
-    document.querySelectorAll(".useRow").forEach((u) => {
-      const file = u.getAttribute("data-file");
-      const line = Number(u.getAttribute("data-line") || "1");
-      const open = () => vscode.postMessage({ type: "open", file, line });
-
-      u.addEventListener("click", (e) => {
-        e.stopPropagation();
-        open();
-      });
-      u.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          open();
-        }
-      });
+      const expBtn = row.querySelector(".exp");
+      const expanded = row.querySelector(".expanded");
+      if (expBtn && expanded) {
+        expBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const isOpen = expanded.style.display !== "none";
+          expanded.style.display = isOpen ? "none" : "flex";
+          expBtn.textContent = isOpen ? "▾" : "▴";
+        });
+      }
     });
   </script>
 </body>
 </html>`;
   }
+
+  private renderColorRow(c: ColorHit, key: string): string {
+    const labelLine = c.kind === "var" ? `<div class="label">Label: ${escapeHtml(c.name)}</div>` : "";
+    const colorLine = `<div class="value">Color: ${escapeHtml(c.value)}</div>`;
+    const lineLine = `<div class="line">Line: ${c.range.line}</div>`;
+
+    const usageHtml =
+      c.usages.length === 0
+        ? `<div class="useSample">No usage locations found (yet).</div>`
+        : c.usages
+            .slice(0, 50)
+            .map((u) => {
+              const left = `${u.scope} • ${u.prop}`;
+              const right = `Line ${u.line}`;
+              return `
+<div class="useRow">
+  <div class="useLeft" title="${escapeHtml(left)}">${escapeHtml(left)}</div>
+  <div class="useRight">${escapeHtml(right)}</div>
+</div>
+<div class="useSample" title="${escapeHtml(u.sample)}">${escapeHtml(u.sample)}</div>`;
+            })
+            .join("");
+
+    return `
+<div class="row"
+     role="button"
+     tabindex="0"
+     data-file="${escapeHtml(c.file)}"
+     data-line="${c.range.line}"
+     data-startcol="${c.range.startCol}"
+     data-endcol="${c.range.endCol}"
+     data-value="${escapeHtml(c.value)}">
+
+  <button class="swatchBtn" title="Open VS Code color picker" aria-label="Open VS Code color picker">
+    <div class="swatch" style="background:${escapeHtmlAttr(c.value)}"></div>
+  </button>
+
+  <div class="meta">
+    ${labelLine}
+    ${colorLine}
+    ${lineLine}
+  </div>
+
+  <div class="btnRow">
+    <button class="exp" title="Show usage" aria-label="Show usage">▾</button>
+    <button class="copy" title="Copy color" aria-label="Copy color">Copy</button>
+  </div>
+
+  <div class="expanded">
+    ${usageHtml}
+  </div>
+</div>`;
+  }
 }
 
-/* =========================================================
-   Extension activation
-========================================================= */
-
 export function activate(context: vscode.ExtensionContext) {
-  const provider = new ColorInspectorViewProvider(context.workspaceState);
+  const provider = new ColorInspectorViewProvider(context);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ColorInspectorViewProvider.viewType, provider)
   );
 
+  // Command: Scan/Refresh (manual trigger)
   context.subscriptions.push(
     vscode.commands.registerCommand("color-inspector.scan", async () => {
+      // Mark as scanned so button becomes Refresh and autoscan (if enabled) is allowed
+      (provider as any).hasScanned = true; // keep it simple; view provider handles UI state
       await provider.render();
-    })
-  );
-
-  context.subscriptions.push(
-    vscode.window.onDidChangeActiveTextEditor(() => {
-      void provider.render();
-    })
-  );
-
-  context.subscriptions.push(
-    vscode.workspace.onDidChangeTextDocument(() => {
-      void provider.render();
     })
   );
 }
 
 export function deactivate() {}
 
-/* =========================================================
+/* -----------------------------
    Helpers: open/jump + VS Code picker (+ ask before auto space)
-========================================================= */
+------------------------------ */
 
 async function openFileAtLine(relPath: string, line1Based: number): Promise<void> {
   const folders = vscode.workspace.workspaceFolders;
@@ -891,7 +865,7 @@ async function openFileSelectRangeAndPickVscode(
     let sCol = Math.max(0, startCol);
     let eCol = Math.max(sCol, endCol);
 
-    // If we have :# (no space) immediately before token, ASK to insert a space
+    // If we have :# (no space) immediately before the token, ASK to insert a space.
     if (sCol > 0) {
       const lineText = doc.lineAt(line0).text;
       const prevChar = lineText[sCol - 1] ?? "";
@@ -917,7 +891,7 @@ async function openFileSelectRangeAndPickVscode(
       }
     }
 
-    // Put caret inside token; picker reads token at caret
+    // Caret INSIDE token – VS Code picker reads token at caret.
     const caretCol = Math.min(sCol + 1, Math.max(eCol - 1, sCol));
     const caret = new vscode.Position(line0, caretCol);
 
@@ -930,7 +904,7 @@ async function openFileSelectRangeAndPickVscode(
 
     await vscode.commands.executeCommand("editor.action.showOrFocusStandaloneColorPicker");
 
-    // Restore caret-only selection
+    // VS Code may select the token/line when opening the picker. Force caret-only selection back.
     const caretPos = editor.selection.active;
     setTimeout(() => {
       const active = vscode.window.activeTextEditor;
@@ -944,9 +918,9 @@ async function openFileSelectRangeAndPickVscode(
   }
 }
 
-/* =========================================================
-   Helpers: IO + indices
-========================================================= */
+/* -----------------------------
+   Helpers: scan colors + usages
+------------------------------ */
 
 async function readUriText(uri: vscode.Uri): Promise<string> {
   const data = await vscode.workspace.fs.readFile(uri);
@@ -967,7 +941,6 @@ function offsetToLine0(lineStarts: number[], offset: number): number {
   let lo = 0;
   let hi = lineStarts.length - 1;
   let ans = 0;
-
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
     if (lineStarts[mid] <= offset) {
@@ -977,7 +950,6 @@ function offsetToLine0(lineStarts: number[], offset: number): number {
       hi = mid - 1;
     }
   }
-
   return ans;
 }
 
@@ -987,208 +959,41 @@ function offsetToCol(lineStarts: number[], offset: number): number {
   return Math.max(0, offset - start);
 }
 
-function getLineText(text: string, lineStarts: number[], line0: number): string {
-  const start = lineStarts[line0] ?? 0;
-  const end = line0 + 1 < lineStarts.length ? (lineStarts[line0 + 1] ?? text.length) : text.length;
-  return text.slice(start, end).replace(/\r?\n$/, "");
-}
-
-/* =========================================================
-   Helpers: keys + detection
-========================================================= */
-
 function normalizeColorKey(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, "");
 }
 
-function makeColorKey(o: ColorOccur): string {
-  const v = normalizeColorKey(o.value);
-  if (o.kind === "var") {
-    return `var:${o.name.toLowerCase()}=${v}`;
-  }
-  return `lit:${v}`;
-}
+function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: string): ColorHit[] {
+  const hits: ColorHit[] = [];
 
-function isCssFile(file: string): boolean {
-  return /\.(css|scss|sass|less)$/i.test(file);
-}
-
-/* =========================================================
-   Context extraction (CSS selector + property / JS style key)
-========================================================= */
-
-function findCssContext(
-  text: string,
-  lineStarts: number[],
-  offset: number
-): { scope?: string; property?: string } {
-  const line0 = offsetToLine0(lineStarts, offset);
-  const lineText = getLineText(text, lineStarts, line0);
-
-  let property: string | undefined;
-  const propMatch = lineText.match(/^\s*([-\w]+)\s*:/);
-  if (propMatch) {
-    property = propMatch[1];
-  }
-
-  const before = text.slice(0, offset);
-  const bracePos = before.lastIndexOf("{");
-  if (bracePos < 0) {
-    return { scope: undefined, property };
-  }
-
-  const beforeBrace = before.slice(0, bracePos);
-  const prevClose = beforeBrace.lastIndexOf("}");
-  const selectorChunk = beforeBrace.slice(prevClose >= 0 ? prevClose + 1 : 0);
-
-  const scope = selectorChunk
-    .replace(/\/\*.*?\*\//g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  return { scope: scope || undefined, property };
-}
-
-/**
- * Find the JS object key (style property) closest BEFORE a given column on the same line.
- * Example: border: "1px solid var(--border)" -> "border"
- */
-function findJsPropertyKeyBeforeCol(lineText: string, col: number): string | undefined {
-  const upTo = lineText.slice(0, Math.max(0, col));
-  const re = /(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][A-Za-z0-9_$-]*))\s*:\s*/g;
-
-  let last: RegExpExecArray | null = null;
-  let m: RegExpExecArray | null = null;
-
-  while ((m = re.exec(upTo)) !== null) {
-    last = m;
-  }
-
-  if (!last) {
-    return undefined;
-  }
-
-  const key = (last[1] ?? last[2] ?? last[3])?.trim();
-  return key || undefined;
-}
-
-/**
- * JSX scope around a token:
- * - Prefer nearest className within the same JSX tag (even if multi-line)
- * - Else fallback to tag name (div, button, etc.)
- */
-function findJsxScopeAround(text: string, lineStarts: number[], tokenLine0: number): string | undefined {
-  const MAX_BACK = 30;
-  const startLine0 = Math.max(0, tokenLine0 - MAX_BACK);
-
-  // Find likely start of the current tag by walking up until we hit a '<'
-  let tagStartLine0: number | undefined;
-  for (let i = tokenLine0; i >= startLine0; i--) {
-    const lt = getLineText(text, lineStarts, i);
-    if (lt.includes("<")) {
-      tagStartLine0 = i;
-      break;
-    }
-  }
-
-  const lines: string[] = [];
-  if (tagStartLine0 !== undefined) {
-    for (let i = tagStartLine0; i <= tokenLine0; i++) {
-      lines.push(getLineText(text, lineStarts, i));
-    }
-  } else {
-    lines.push(getLineText(text, lineStarts, tokenLine0));
-  }
-
-  const chunk = lines.join(" ");
-
-  // className="pair-card other"
-  const m1 = chunk.match(/\bclassName\s*=\s*["']([^"']+)["']/);
-  if (m1?.[1]) {
-    const first = m1[1].trim().split(/\s+/)[0];
-    if (first) {
-      return `.${first}`;
-    }
-  }
-
-  // className={"pair-card"} / {'pair-card'}
-  const m2 = chunk.match(/\bclassName\s*=\s*\{\s*["']([^"']+)["']\s*\}/);
-  if (m2?.[1]) {
-    const first = m2[1].trim().split(/\s+/)[0];
-    if (first) {
-      return `.${first}`;
-    }
-  }
-
-  // Fallback: tag name
-  const m3 = chunk.match(/<\s*([A-Za-z][A-Za-z0-9]*)\b/);
-  if (m3?.[1]) {
-    return m3[1];
-  }
-
-  return undefined;
-}
-
-/* =========================================================
-   Scan: var definitions (for resolving var(--x))
-========================================================= */
-
-function scanVarDefinitions(text: string): VarDef[] {
-  const defs: VarDef[] = [];
-  const cssVarDefRegex = /--([A-Za-z0-9_-]+)\s*:\s*([^;]+)\s*;/g;
-
-  for (const m of text.matchAll(cssVarDefRegex)) {
-    const propName = `--${m[1]}`;
-    const rhs = m[2].trim();
-
-    const value = extractFirstColorToken(rhs);
-    if (!value) {
-      continue;
-    }
-
-    defs.push({ name: propName, value });
-  }
-
-  return defs;
-}
-
-/* =========================================================
-   Scan: occurrences (var defs + var refs + literals)
-========================================================= */
-
-function scanTextForColorOccurrences(
-  text: string,
-  lineStarts: number[],
-  file: string,
-  globalVarValueByName: Map<string, string>
-): ColorOccur[] {
-  const occ: ColorOccur[] = [];
-
-  // Hex: #fff, #ffff, #ffffff, #ffffffff
+  // Color formats
   const hexRegex = /#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b/g;
 
-  // rgb() / rgba()
   const rgbRegex =
-    /\brgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}(?:\s*,\s*(?:0?\.\d+|1|0|\.\d+))?\s*\)/gi;
+    /\brgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}(?:\s*,\s*(?:0?\.\d+|1|0|\.\d+))?\s*\)/g;
 
-  // hsl() / hsla()
   const hslRegex =
-    /\bhsla?\(\s*\d{1,3}(?:deg)?\s*,\s*\d{1,3}%\s*,\s*\d{1,3}%\s*(?:,\s*(?:0?\.\d+|1|0|\.\d+))?\s*\)/gi;
+    /\bhsla?\(\s*\d{1,3}(?:deg|rad|turn)?\s*,\s*\d{1,3}%\s*,\s*\d{1,3}%(?:\s*,\s*(?:0?\.\d+|1|0|\.\d+))?\s*\)/g;
 
+  // CSS var definition: --name: value;
   const cssVarDefRegex = /--([A-Za-z0-9_-]+)\s*:\s*([^;]+)\s*;/g;
-  const cssVarRefRegex = /var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,\s*[^)]*)?\)/g;
 
-  // Exclude spans so we don't double-count literals inside var-def values
-  const excludeSpans: Array<{ start: number; end: number }> = [];
+  // Track ranges of var-def values to avoid double-counting as literals
+  // key = `${line}:${startCol}:${endCol}:${normVal}`
+  const varValueRangeKeys = new Set<string>();
 
-  // 1) Var definitions
+  // First pass: variable definitions
   for (const m of text.matchAll(cssVarDefRegex)) {
     const matchStart = m.index ?? 0;
     const whole = m[0];
     const propName = `--${m[1]}`;
-    const rhs = m[2].trim();
+    const rhs = (m[2] ?? "").trim();
 
-    const value = extractFirstColorToken(rhs);
+    const value =
+      (rhs.match(/^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b/)?.[0] ??
+        rhs.match(/^(?:rgba?|hsla?)\([^)]*\)/i)?.[0] ??
+        "")?.trim();
+
     if (!value) {
       continue;
     }
@@ -1200,284 +1005,233 @@ function scanTextForColorOccurrences(
 
     const startOffset = matchStart + inner;
     const endOffset = startOffset + value.length;
-    excludeSpans.push({ start: startOffset, end: endOffset });
 
     const line0 = offsetToLine0(lineStarts, startOffset);
     const line = line0 + 1;
 
-    const snippet = getLineText(text, lineStarts, line0);
-    const col = offsetToCol(lineStarts, startOffset);
+    const startCol = offsetToCol(lineStarts, startOffset);
+    const endCol = offsetToCol(lineStarts, endOffset);
+    varValueRangeKeys.add(`${line}:${startCol}:${endCol}:${normalizeColorKey(value)}`);
 
-    let scope: string | undefined;
-    let property: string | undefined;
-
-    if (isCssFile(file)) {
-      const cssCtx = findCssContext(text, lineStarts, startOffset);
-      scope = cssCtx.scope;
-      property = cssCtx.property;
-    } else {
-      scope = findJsxScopeAround(text, lineStarts, line0);
-      property = findJsPropertyKeyBeforeCol(snippet, col);
-    }
-
-    occ.push({
+    // Usages: the definition itself isn’t a usage; we’ll compute usages later
+    hits.push({
       kind: "var",
       name: propName,
       value,
       file,
-      range: {
-        line,
-        startCol: col,
-        endCol: offsetToCol(lineStarts, endOffset),
-      },
-      usage: {
-        isDefinition: true,
-        scope,
-        property,
-        line,
-      },
+      range: { line, startCol, endCol },
+      usages: [],
     });
   }
 
-  excludeSpans.sort((a, b) => a.start - b.start);
+  // Second pass: literals (hex/rgb/hsl)
+  const addLiteralHit = (value: string, startOffset: number) => {
+    const endOffset = startOffset + value.length;
+    const line0 = offsetToLine0(lineStarts, startOffset);
+    const line = line0 + 1;
+    const startCol = offsetToCol(lineStarts, startOffset);
+    const endCol = offsetToCol(lineStarts, endOffset);
 
-  const isExcluded = (start: number, end: number): boolean => {
-    let lo = 0;
-    let hi = excludeSpans.length - 1;
-    let idx = -1;
+    const key = `${line}:${startCol}:${endCol}:${normalizeColorKey(value)}`;
+    if (varValueRangeKeys.has(key)) {
+      return; // avoid duplicate where var def value matches literal at same spot
+    }
 
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (excludeSpans[mid].start <= start) {
-        idx = mid;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
+    hits.push({
+      kind: "literal",
+      value,
+      file,
+      range: { line, startCol, endCol },
+      usages: [],
+    });
+  };
+
+  for (const m of text.matchAll(hexRegex)) {
+    const startOffset = m.index ?? 0;
+    addLiteralHit(m[0], startOffset);
+  }
+
+  for (const m of text.matchAll(rgbRegex)) {
+    const startOffset = m.index ?? 0;
+    addLiteralHit(m[0], startOffset);
+  }
+
+  for (const m of text.matchAll(hslRegex)) {
+    const startOffset = m.index ?? 0;
+    addLiteralHit(m[0], startOffset);
+  }
+
+  // Build quick lookup for var names in this file so we can resolve var(...) usages
+  const varNames = new Set<string>();
+  for (const h of hits) {
+    if (h.kind === "var") {
+      varNames.add(h.name);
+    }
+  }
+
+  // Usage extraction (best-effort, line-based)
+  const lines = text.split(/\r?\n/);
+
+  // Map from normalized color value -> hit indices
+  const valueToHits = new Map<string, number[]>();
+  for (let i = 0; i < hits.length; i++) {
+    const norm = normalizeColorKey(hits[i].value);
+    const arr = valueToHits.get(norm) ?? [];
+    arr.push(i);
+    valueToHits.set(norm, arr);
+  }
+
+  // Also map from var name -> hit indices
+  const varToHits = new Map<string, number[]>();
+  for (let i = 0; i < hits.length; i++) {
+    const h = hits[i];
+    if (h.kind === "var") {
+      const arr = varToHits.get(h.name) ?? [];
+      arr.push(i);
+      varToHits.set(h.name, arr);
+    }
+  }
+
+  // Find scope: prefer CSS selector lines like ".x:hover {", else prefer className="x", else fallback to tag
+  const findCssScopeNear = (lineIdx: number): string | undefined => {
+    for (let i = lineIdx; i >= 0 && i >= lineIdx - 40; i--) {
+      const t = lines[i].trim();
+      if (t.endsWith("{")) {
+        const sel = t.slice(0, -1).trim();
+        if (sel.length > 0 && !sel.startsWith("@")) {
+          return sel;
+        }
+      }
+    }
+    return undefined;
+  };
+
+  const findJsxScopeNear = (lineIdx: number): string | undefined => {
+    // Search upwards for className="..." or className={'...'} or className={...}
+    for (let i = lineIdx; i >= 0 && i >= lineIdx - 60; i--) {
+      const t = lines[i];
+      const m1 = t.match(/\bclassName\s*=\s*["']([^"']+)["']/);
+      if (m1 && m1[1]) {
+        const first = m1[1].trim().split(/\s+/)[0];
+        if (first) {
+          return first.startsWith(".") ? first : `.${first}`;
+        }
+      }
+      const m2 = t.match(/\bclass\s*=\s*["']([^"']+)["']/);
+      if (m2 && m2[1]) {
+        const first = m2[1].trim().split(/\s+/)[0];
+        if (first) {
+          return first.startsWith(".") ? first : `.${first}`;
+        }
+      }
+      const mTag = t.match(/<\s*([A-Za-z][A-Za-z0-9:_-]*)\b/);
+      if (mTag && mTag[1]) {
+        return mTag[1];
+      }
+    }
+    return undefined;
+  };
+
+  const findPropertyKeyOnLine = (lineText: string): string | undefined => {
+    // CSS: "background: ..." or "box-shadow: ..."
+    const cssProp = lineText.match(/^\s*([A-Za-z-]+)\s*:\s*/);
+    if (cssProp && cssProp[1]) {
+      return cssProp[1];
+    }
+
+    // JSX inline style object: borderBottom: "1px solid var(--border)"
+    const jsProp = lineText.match(/\b([A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*["']/);
+    if (jsProp && jsProp[1]) {
+      return jsProp[1];
+    }
+
+    // JSX style object with var(...) without quotes sometimes: border: 1
+    const jsProp2 = lineText.match(/\b([A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*[^,]+/);
+    if (jsProp2 && jsProp2[1]) {
+      return jsProp2[1];
+    }
+
+    return undefined;
+  };
+
+  const addUsageToHit = (hitIndex: number, usage: UsageHit) => {
+    const h = hits[hitIndex];
+    const existsAlready = h.usages.some(
+      (u) => u.file === usage.file && u.line === usage.line && u.scope === usage.scope && u.prop === usage.prop
+    );
+    if (!existsAlready) {
+      h.usages.push(usage);
+    }
+  };
+
+  for (let li = 0; li < lines.length; li++) {
+    const lineText = lines[li];
+    const lineNo = li + 1;
+
+    // Literal usage checks
+    const literalMatches = [
+      ...lineText.matchAll(/#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b/g),
+      ...lineText.matchAll(/\brgba?\(\s*[^)]+\)/g),
+      ...lineText.matchAll(/\bhsla?\(\s*[^)]+\)/g),
+    ];
+
+    for (const mm of literalMatches) {
+      const raw = (mm[0] ?? "").trim();
+      if (!raw) {
+        continue;
+      }
+      const norm = normalizeColorKey(raw);
+      const idxs = valueToHits.get(norm);
+      if (!idxs || idxs.length === 0) {
+        continue;
+      }
+
+      const prop = findPropertyKeyOnLine(lineText) ?? "unknown";
+      const scope = findCssScopeNear(li) ?? findJsxScopeNear(li) ?? "unknown";
+      const sample = lineText.trim().slice(0, 220);
+
+      for (const hitIndex of idxs) {
+        addUsageToHit(hitIndex, { file, line: lineNo, scope, prop, sample });
       }
     }
 
-    if (idx < 0) {
-      return false;
+    // var(--token) usage checks (for var-defined hits)
+    const varMatches = [...lineText.matchAll(/var\(\s*(--[A-Za-z0-9_-]+)\s*\)/g)];
+    for (const vm of varMatches) {
+      const name = (vm[1] ?? "").trim();
+      if (!name) {
+        continue;
+      }
+      if (!varNames.has(name)) {
+        // Still record usage if we have a hit for it? If not defined in this file, it might be in another import.
+        // We’ll still try to attach by name if present.
+      }
+      const idxs = varToHits.get(name);
+      if (!idxs || idxs.length === 0) {
+        continue;
+      }
+
+      const prop = findPropertyKeyOnLine(lineText) ?? "unknown";
+      const scope = findCssScopeNear(li) ?? findJsxScopeNear(li) ?? "unknown";
+      const sample = lineText.trim().slice(0, 220);
+
+      for (const hitIndex of idxs) {
+        addUsageToHit(hitIndex, { file, line: lineNo, scope, prop, sample });
+      }
     }
-
-    const s = excludeSpans[idx];
-    return start < s.end && end > s.start;
-  };
-
-  // 2) Var references: var(--border) anywhere (CSS, TSX strings, etc.)
-  for (const m of text.matchAll(cssVarRefRegex)) {
-    const startOffset = m.index ?? 0;
-    const matchText = m[0];
-    const name = m[1];
-    const endOffset = startOffset + matchText.length;
-
-    const resolved = globalVarValueByName.get(name);
-    if (!resolved) {
-      continue;
-    }
-
-    const line0 = offsetToLine0(lineStarts, startOffset);
-    const line = line0 + 1;
-
-    const snippet = getLineText(text, lineStarts, line0);
-    const col = offsetToCol(lineStarts, startOffset);
-
-    let scope: string | undefined;
-    let property: string | undefined;
-
-    if (isCssFile(file)) {
-      const cssCtx = findCssContext(text, lineStarts, startOffset);
-      scope = cssCtx.scope;
-      property = cssCtx.property;
-    } else {
-      scope = findJsxScopeAround(text, lineStarts, line0);
-      property = findJsPropertyKeyBeforeCol(snippet, col);
-    }
-
-    occ.push({
-      kind: "var",
-      name,
-      value: resolved,
-      file,
-      range: {
-        line,
-        startCol: col,
-        endCol: offsetToCol(lineStarts, endOffset),
-      },
-      usage: {
-        isDefinition: false,
-        scope,
-        property,
-        line,
-      },
-    });
   }
 
-  // 3) Literal hex
-  for (const m of text.matchAll(hexRegex)) {
-    const startOffset = m.index ?? 0;
-    const value = m[0];
-    const endOffset = startOffset + value.length;
-
-    if (isExcluded(startOffset, endOffset)) {
-      continue;
-    }
-
-    const line0 = offsetToLine0(lineStarts, startOffset);
-    const line = line0 + 1;
-
-    const snippet = getLineText(text, lineStarts, line0);
-    const col = offsetToCol(lineStarts, startOffset);
-
-    let scope: string | undefined;
-    let property: string | undefined;
-
-    if (isCssFile(file)) {
-      const cssCtx = findCssContext(text, lineStarts, startOffset);
-      scope = cssCtx.scope;
-      property = cssCtx.property;
-    } else {
-      scope = findJsxScopeAround(text, lineStarts, line0);
-      property = findJsPropertyKeyBeforeCol(snippet, col);
-    }
-
-    occ.push({
-      kind: "literal",
-      value,
-      file,
-      range: {
-        line,
-        startCol: col,
-        endCol: offsetToCol(lineStarts, endOffset),
-      },
-      usage: {
-        isDefinition: false,
-        scope,
-        property,
-        line,
-      },
-    });
+  // Keep usages ordered + small
+  for (const h of hits) {
+    h.usages.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.scope.localeCompare(b.scope));
   }
 
-  // 4) Literal rgb/rgba
-  for (const m of text.matchAll(rgbRegex)) {
-    const startOffset = m.index ?? 0;
-    const value = m[0];
-    const endOffset = startOffset + value.length;
-
-    if (isExcluded(startOffset, endOffset)) {
-      continue;
-    }
-
-    const line0 = offsetToLine0(lineStarts, startOffset);
-    const line = line0 + 1;
-
-    const snippet = getLineText(text, lineStarts, line0);
-    const col = offsetToCol(lineStarts, startOffset);
-
-    let scope: string | undefined;
-    let property: string | undefined;
-
-    if (isCssFile(file)) {
-      const cssCtx = findCssContext(text, lineStarts, startOffset);
-      scope = cssCtx.scope;
-      property = cssCtx.property;
-    } else {
-      scope = findJsxScopeAround(text, lineStarts, line0);
-      property = findJsPropertyKeyBeforeCol(snippet, col);
-    }
-
-    occ.push({
-      kind: "literal",
-      value,
-      file,
-      range: {
-        line,
-        startCol: col,
-        endCol: offsetToCol(lineStarts, endOffset),
-      },
-      usage: {
-        isDefinition: false,
-        scope,
-        property,
-        line,
-      },
-    });
-  }
-
-  // 5) Literal hsl/hsla
-  for (const m of text.matchAll(hslRegex)) {
-    const startOffset = m.index ?? 0;
-    const value = m[0];
-    const endOffset = startOffset + value.length;
-
-    if (isExcluded(startOffset, endOffset)) {
-      continue;
-    }
-
-    const line0 = offsetToLine0(lineStarts, startOffset);
-    const line = line0 + 1;
-
-    const snippet = getLineText(text, lineStarts, line0);
-    const col = offsetToCol(lineStarts, startOffset);
-
-    let scope: string | undefined;
-    let property: string | undefined;
-
-    if (isCssFile(file)) {
-      const cssCtx = findCssContext(text, lineStarts, startOffset);
-      scope = cssCtx.scope;
-      property = cssCtx.property;
-    } else {
-      scope = findJsxScopeAround(text, lineStarts, line0);
-      property = findJsPropertyKeyBeforeCol(snippet, col);
-    }
-
-    occ.push({
-      kind: "literal",
-      value,
-      file,
-      range: {
-        line,
-        startCol: col,
-        endCol: offsetToCol(lineStarts, endOffset),
-      },
-      usage: {
-        isDefinition: false,
-        scope,
-        property,
-        line,
-      },
-    });
-  }
-
-  return occ;
+  return hits;
 }
 
-function extractFirstColorToken(rhs: string): string {
-  const s = rhs.trim();
-
-  const hex = s.match(/^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b/);
-  if (hex?.[0]) {
-    return hex[0].trim();
-  }
-
-  const rgb = s.match(/^(?:rgba?|RGBA?)\([^)]*\)/);
-  if (rgb?.[0]) {
-    return rgb[0].trim();
-  }
-
-  const hsl = s.match(/^(?:hsla?|HSLA?)\([^)]*\)/);
-  if (hsl?.[0]) {
-    return hsl[0].trim();
-  }
-
-  return "";
-}
-
-/* =========================================================
-   Import graph (explicit only)
-========================================================= */
+/* -----------------------------
+   Helpers: import graph (explicit only)
+------------------------------ */
 
 type ImportSpec = { spec: string; kind: "js" | "css" };
 
@@ -1489,7 +1243,7 @@ function findImports(text: string): ImportSpec[] {
   const importBare = /\bimport\s+["']([^"']+)["']/g;
   const requireRe = /\brequire\(\s*["']([^"']+)["']\s*\)/g;
 
-  // Keep this clean (your earlier one got corrupted by a formatter)
+  // Fixed cssImport regex (your broken one was from a copy/paste mangling)
   const cssImport = /@import\s+(?:url\(\s*)?["']([^"']+)["']\s*\)?/g;
 
   const add = (spec: string, kind: "js" | "css") => {
@@ -1517,6 +1271,7 @@ function findImports(text: string): ImportSpec[] {
 }
 
 function isFollowable(spec: string, kind: "js" | "css"): boolean {
+  // explicit relative / common aliases
   if (spec.startsWith("./") || spec.startsWith("../")) {
     return true;
   }
@@ -1526,67 +1281,54 @@ function isFollowable(spec: string, kind: "js" | "css"): boolean {
   if (spec.startsWith("@/") || spec.startsWith("~/")) {
     return true;
   }
-  if (kind === "css" && !spec.startsWith(".") && !spec.startsWith("@") && !spec.startsWith("~")) {
+  // CSS often does relative-ish imports without ./ (best-effort)
+  if (kind === "css" && !spec.startsWith("http") && !spec.startsWith("data:")) {
     return true;
   }
   return false;
 }
 
-function resolveWithExtensions(raw: vscode.Uri, spec: string): vscode.Uri[] {
-  const hasExt = /\.[a-zA-Z0-9]+$/.test(spec);
+function resolveWithExtensions(rawBase: vscode.Uri, specForExtTest: string): vscode.Uri[] {
+  const hasExt = /\.[a-zA-Z0-9]+$/.test(specForExtTest);
   if (hasExt) {
-    return [raw];
+    return [rawBase];
   }
 
-  const exts = [
-    ".ts",
-    ".tsx",
-    ".js",
-    ".jsx",
-    ".css",
-    ".scss",
-    ".sass",
-    ".less",
-    ".json",
-    ".vue",
-    ".svelte",
-    ".html",
-  ];
+  const exts = [".ts", ".tsx", ".js", ".jsx", ".css", ".scss", ".sass", ".less", ".json", ".vue", ".svelte", ".html"];
   const candidates: vscode.Uri[] = [];
 
   for (const ext of exts) {
-    candidates.push(vscode.Uri.parse(raw.toString() + ext));
+    candidates.push(vscode.Uri.parse(rawBase.toString() + ext));
   }
   for (const ext of exts) {
-    candidates.push(vscode.Uri.joinPath(raw, "index" + ext));
+    candidates.push(vscode.Uri.joinPath(rawBase, "index" + ext));
   }
 
   return candidates;
 }
 
-function resolveImportCandidates(
-  baseFile: vscode.Uri,
-  wsRoot: vscode.Uri,
-  spec: string,
-  kind: "js" | "css"
-): vscode.Uri[] {
+function resolveImportCandidates(baseFile: vscode.Uri, wsRoot: vscode.Uri, spec: string, kind: "js" | "css"): vscode.Uri[] {
   const s = spec.trim();
 
+  // Absolute from workspace root
   if (s.startsWith("/")) {
     const without = s.replace(/^\/+/, "");
     return resolveWithExtensions(vscode.Uri.joinPath(wsRoot, without), s);
   }
 
+  // Alias "@/..." or "~//..."
   if (s.startsWith("@/") || s.startsWith("~/")) {
     const without = s.slice(2);
     return resolveWithExtensions(vscode.Uri.joinPath(wsRoot, without), s);
   }
 
+  // Relative
   if (s.startsWith("./") || s.startsWith("../")) {
     const baseDir = vscode.Uri.joinPath(baseFile, "..");
     return resolveWithExtensions(vscode.Uri.joinPath(baseDir, s), s);
   }
 
+  // CSS import without ./ is treated as relative to current file
   if (kind === "css") {
     const baseDir = vscode.Uri.joinPath(baseFile, "..");
     return resolveWithExtensions(vscode.Uri.joinPath(baseDir, s), s);
@@ -1609,10 +1351,13 @@ async function collectImportGraph(root: vscode.Uri, wsRoot: vscode.Uri, maxFiles
   const queue: vscode.Uri[] = [root];
   const out: vscode.Uri[] = [];
 
-  while (queue.length && out.length < maxFiles) {
-    const uri = queue.shift()!;
-    const key = uri.toString();
+  while (queue.length > 0 && out.length < maxFiles) {
+    const uri = queue.shift();
+    if (!uri) {
+      break;
+    }
 
+    const key = uri.toString();
     if (visited.has(key)) {
       continue;
     }
@@ -1635,7 +1380,6 @@ async function collectImportGraph(root: vscode.Uri, wsRoot: vscode.Uri, maxFiles
 
       const candidates = resolveImportCandidates(uri, wsRoot, imp.spec, imp.kind);
       for (const c of candidates) {
-     
         if (await exists(c)) {
           queue.push(c);
           break;
@@ -1645,4 +1389,26 @@ async function collectImportGraph(root: vscode.Uri, wsRoot: vscode.Uri, maxFiles
   }
 
   return out;
+}
+
+/* -----------------------------
+   HTML escaping
+------------------------------ */
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (ch) => {
+    const map: Record<string, string> = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    };
+    return map[ch] ?? ch;
+  });
+}
+
+// For attributes (same as HTML here; kept separate for clarity)
+function escapeHtmlAttr(s: string): string {
+  return escapeHtml(s);
 }
