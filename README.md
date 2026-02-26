@@ -12,9 +12,21 @@
 ![Visual Studio Marketplace Downloads](https://img.shields.io/visual-studio-marketplace/d/rodclemen.color-inspector)
 
 
-A focused VS Code extension that scans the active file and its explicit imports to find and organize color usage.
+Track down every color in your codebase (via explicit imports). Swatches, copy-paste, jump-to-line, and usage — in the sidebar.
 
-No guessing. No magic crawling. Just what you actually imported.
+🚧 Early development. Contributions welcome.
+
+## What it does
+- Scans the active file and its **explicit imports** (hard stop: no guessing)
+- Finds CSS variables and color literals (hex, rgb/rgba, hsl/hsla)
+- Groups results by file with large, readable swatches
+- Expand a color to see **where it’s used** (best-effort)
+- Click to copy, click to jump, click swatch to open the VS Code color picker
+
+## How to use
+1. Open a file
+2. Open the **Color Inspector** view in the Activity Bar
+3. Click **Scan** (first time) / **Refresh** (after)
 
 ---
 
