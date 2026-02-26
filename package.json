@@ -11,7 +11,7 @@
   "license": "MIT",
   "name": "color-inspector",
   "displayName": "color-inspector",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "publisher": "rodclemen",
   "icon": "media/icon.png",
   "engines": {
