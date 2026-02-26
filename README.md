@@ -209,3 +209,13 @@ Package:
 ## 📄 License
 
 MIT
+
+---
+
+## 📝 Changelog
+
+### 0.0.1
+- Initial release — color scanning from active file and explicit imports
+- CSS variable detection, var() resolution, hex/rgb/hsl support
+- Sidebar view with swatches, jump-to-line, copy, and VS Code color picker
+- Added CONTRIBUTING.md, CODE_OF_CONDUCT.md, issue templates, and release checklist
