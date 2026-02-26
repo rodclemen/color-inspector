@@ -11,7 +11,7 @@
   "license": "MIT",
   "name": "color-inspector",
   "displayName": "color-inspector",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "rodclemen",
   "icon": "media/icon.png",
   "engines": {
@@ -24,19 +24,17 @@
   "main": "./out/extension.js",
   "contributes": {
     "configuration": {
-    "title": "Color Inspector",
-    "properties": {
-      "colorInspector.autoScanMinutes": {
-        "type": "number",
-        "default": 0,
-        "minimum": 0,
-        "maximum": 10,
-        "description": "Auto-scan interval in minutes. 0 = Off. Range: 1–10."
+      "title": "Color Inspector",
+      "properties": {
+        "colorInspector.autoScanMinutes": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Auto-scan interval in minutes. 0 = Off. Range: 1–10."
+        }
       }
-    }
-  },
-    
-    
+    },
     "commands": [
       {
         "command": "color-inspector.scan",
