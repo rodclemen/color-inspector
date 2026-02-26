@@ -11,7 +11,7 @@
   "license": "MIT",
   "name": "color-inspector",
   "displayName": "Color Inspector",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "rodclemen",
   "icon": "media/icon.png",
   "engines": {
@@ -84,18 +84,18 @@
     "typescript": "^5.9.3"
   },
   "keywords": [
-    "color", 
-    "colors", 
-    "css", 
-    "scss", 
-    "sass", 
-    "theming", 
-    "palette", 
-    "variables", 
-    "hex", 
-    "rgba", 
+    "color",
+    "colors",
+    "css",
+    "scss",
+    "sass",
+    "theming",
+    "palette",
+    "variables",
+    "hex",
+    "rgba",
     "hsl",
     "rgb",
     "linters"
-    ]
+  ]
 }
