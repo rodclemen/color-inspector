@@ -1,5 +1,7 @@
 # 🎨 Color Inspector
 
+> 🚧 Early development. Contributions welcome.
+
 ![Version](https://img.shields.io/badge/version-0.0.1-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Early Development](https://img.shields.io/badge/status-early--development-orange)
@@ -46,6 +48,11 @@ If you want to:
 - Polish UI/UX  
 - Add tests  
 - Clean up rough edges  
+
+If you'd like to help improve it, check the issues labeled:
+
+- [good first issue](https://github.com/rodclemen/color-inspector/labels/good%20first%20issue)
+- [help wanted](https://github.com/rodclemen/color-inspector/labels/help%20wanted)
 
 Open an issue. Open a PR. Ask questions.
 
@@ -133,23 +140,20 @@ Note: Complex JSX formatting may not always resolve the correct scope yet.
 
 ## 🗺️ Roadmap
 
-Near-term:
-- Improve detection of color usages in JSX/TSX inline style objects
-- More reliable scope detection across multi-line JSX
-- Better parsing for rgba()/hsla()/color-mix() edge cases
-- Reduce duplicate matches
-- Performance improvements for larger import graphs
+This project is in early development. The core workflow works, but there’s plenty to improve.
 
-Mid-term:
-- Optional AST-based scanning for JS/TS/TSX
-- Support more preprocessors and CSS module patterns
-- Improved usage grouping and deduplication
-- Configurable include/exclude settings
+### Next up
+- Improve usage detection (especially JSX/TSX inline styles and nested declarations)
+- Better grouping / deduping across imports and shared theme variables
+- Performance controls for large projects (limits, caching, incremental scan)
+- More color formats (edge cases) and better parsing of gradients
+- UI polish: smoother expand/collapse, better density controls
 
-Later:
-- Export color reports (JSON/CSV)
-- Enhanced swatch rendering
-- Automated tests for real-world codebases
+### Nice-to-have
+- Export palette (JSON / CSS vars / ASE)
+- Search / filter within results
+- Sort modes (by frequency, by file, by name)
+- “Scan workspace” command (opt-in, not automatic)
 
 ---
 
@@ -209,13 +213,3 @@ Package:
 ## 📄 License
 
 MIT
-
----
-
-## 📝 Changelog
-
-### 0.0.1
-- Initial release — color scanning from active file and explicit imports
-- CSS variable detection, var() resolution, hex/rgb/hsl support
-- Sidebar view with swatches, jump-to-line, copy, and VS Code color picker
-- Added CONTRIBUTING.md, CODE_OF_CONDUCT.md, issue templates, and release checklist
