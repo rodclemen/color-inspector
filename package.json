@@ -33,7 +33,12 @@
           "default": 0,
           "minimum": 0,
           "maximum": 10,
-          "description": "Auto-scan interval in minutes. 0 = Off. Range: 1–10."
+          "description": "Auto-scan interval in minutes. 0 = Off. Range: 1-10."
+        },
+        "colorInspector.themeGroupsStartOpen": {
+          "type": "boolean",
+          "default": false,
+          "description": "Theme groups (Dark/Light/Base/Other) start expanded when rendering the Color Inspector view."
         }
       }
     },

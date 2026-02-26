@@ -7,6 +7,15 @@ import * as vscode from "vscode";
  * Optional auto-scan interval via setting: colorInspector.autoScanMinutes (0–10).
  */
 
+type ThemeTag = "dark" | "light" | "base";
+
+type ThemeInfo = {
+  hasDark: boolean;
+  hasLight: boolean;
+  hasBase: boolean;
+  supportsSystem: boolean; // best-effort: prefers-color-scheme + your selector patterns
+};
+
 type HitRange = {
   line: number; // 1-based
   startCol: number; // 0-based
@@ -29,6 +38,7 @@ type ColorHit =
       file: string;
       range: HitRange;
       usages: UsageHit[];
+      theme: ThemeTag; // dark/light/base (applies to var definitions only)
     }
   | {
       kind: "literal";
@@ -37,6 +47,22 @@ type ColorHit =
       range: HitRange;
       usages: UsageHit[];
     };
+
+function computeFileThemeInfo(text: string, hits: ColorHit[]): ThemeInfo {
+  const hasDark = hits.some((h) => h.kind === "var" && h.theme === "dark");
+  const hasLight = hits.some((h) => h.kind === "var" && h.theme === "light");
+  const hasBase = hits.some((h) => h.kind === "var" && h.theme === "base");
+
+  const lower = text.toLowerCase();
+
+  const hasPrefers = /prefers-color-scheme\s*:\s*(dark|light)/.test(lower);
+  const hasSystemAttr = /data-theme-mode\s*=\s*["']system["']/.test(lower);
+  const hasRootNotAttr = /:root\s*:?\s*not\(\s*\[data-theme-mode\]\s*\)/.test(lower);
+
+  const supportsSystem = hasSystemAttr || (hasPrefers && hasRootNotAttr);
+
+  return { hasDark, hasLight, hasBase, supportsSystem };
+}
 
 const WS_KEY_ALLOW_SPACE = "colorInspector.allowAutoSpaceForHex";
 
@@ -155,6 +181,8 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
     // Initial idle UI (NO auto-scan on open)
     webviewView.webview.html = this.htmlIdle();
 
+    themeGroupsStartOpen: themeGroupsStartOpen(),
+
     // Start auto-scan timer if enabled
     this.restartAutoScanFromSettings();
 
@@ -232,6 +260,7 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
     // Scan all files
     const allHits: ColorHit[] = [];
     const perFileColorCounts = new Map<string, number>();
+    const perFileThemeInfo = new Map<string, ThemeInfo>();
 
     for (const uri of uris) {
       let text = "";
@@ -248,6 +277,7 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
       allHits.push(...hits);
 
       perFileColorCounts.set(fileLabel, (perFileColorCounts.get(fileLabel) ?? 0) + hits.length);
+      perFileThemeInfo.set(fileLabel, computeFileThemeInfo(text, hits));
     }
 
     // De-dupe across files:
@@ -258,7 +288,8 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
     for (const h of allHits) {
       const normVal = normalizeColorKey(h.value);
       if (h.kind === "var") {
-        const key = `${h.file}|${h.name}=${normVal}`.toLowerCase();
+        // include theme so dark/base defs don't collapse into one
+        const key = `${h.file}|${h.theme}|${h.name}=${normVal}`.toLowerCase();
         if (!varSeen.has(key)) {
           varSeen.add(key);
           merged.push(h);
@@ -313,31 +344,38 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
     this.lastImportCount = importCount;
     this.lastImportFiles = importFiles;
 
-    this.view.webview.html = this.htmlMain(merged);
+    this.view.webview.html = this.htmlMain(merged, perFileThemeInfo);
   }
 
   private htmlIdle(message?: string): string {
     const msg = message ?? "Ready. Press Scan to start.";
     return this.htmlShell({
-      headerLeft: escapeHtml(`Color Inspector`),
-      headerMid: escapeHtml(msg),
-      headerRight: "",
-      imports: [],
-      groups: [],
-      buttonLabel: "Scan",
-      showImportsToggle: false,
-      autoScanMinutes: vscode.workspace.getConfiguration().get<number>("colorInspector.autoScanMinutes", 0),
-    });
+  headerLeft: escapeHtml(`Color Inspector`),
+  headerMid: escapeHtml(msg),
+  headerRight: "",
+  imports: [],
+  groups: [],
+  buttonLabel: "Scan",
+  showImportsToggle: false,
+  autoScanMinutes: vscode.workspace.getConfiguration().get<number>("colorInspector.autoScanMinutes", 0),
+  themeGroupsStartOpen: vscode.workspace
+    .getConfiguration()
+    .get<boolean>("colorInspector.themeGroupsStartOpen", false),
+});
   }
 
-  private htmlMain(colors: ColorHit[]): string {
+  private htmlMain(colors: ColorHit[], perFileThemeInfo: Map<string, ThemeInfo>): string {
     const importCount = this.lastImportCount;
     const importLabel = importCount === 1 ? "Import" : "Imports";
     const importsClickable = importCount > 0;
 
     const headerLeft = escapeHtml(this.lastRootRel);
     const headerMid = escapeHtml(`${this.lastTotalColors} colors`);
-    const headerRight = importCount > 0 ? escapeHtml(`+${importCount} ${importLabel}`) : escapeHtml(`+0 Imports`);
+    const headerRight =
+      importCount > 0 ? escapeHtml(`+${importCount} ${importLabel}`) : escapeHtml(`+0 Imports`);
+    const themeGroupsStartOpen = vscode.workspace
+  .getConfiguration()
+  .get<boolean>("colorInspector.themeGroupsStartOpen", false);
 
     // Group by file
     const byFile = new Map<string, ColorHit[]>();
@@ -354,6 +392,12 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
           return a.kind === "var" ? -1 : 1;
         }
         if (a.kind === "var" && b.kind === "var") {
+          // theme ordering: dark, light, base
+          const ta = a.theme === "dark" ? 0 : a.theme === "light" ? 1 : 2;
+          const tb = b.theme === "dark" ? 0 : b.theme === "light" ? 1 : 2;
+          if (ta !== tb) {
+            return ta - tb;
+          }
           const n = a.name.localeCompare(b.name);
           if (n !== 0) {
             return n;
@@ -370,13 +414,19 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
         file,
         count: hits.length,
         hits,
+        themeInfo:
+          perFileThemeInfo.get(file) ?? { hasDark: false, hasLight: false, hasBase: false, supportsSystem: false },
       };
     });
 
     // Root file group first
     groups.sort((a, b) => {
-      if (a.file === this.lastRootRel) return -1;
-      if (b.file === this.lastRootRel) return 1;
+      if (a.file === this.lastRootRel) {
+        return -1;
+      }
+      if (b.file === this.lastRootRel) {
+        return 1;
+      }
       return a.file.localeCompare(b.file);
     });
 
@@ -385,16 +435,56 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
     const buttonLabel = this.hasScanned ? "Refresh" : "Scan";
     const autoScanMinutes = vscode.workspace.getConfiguration().get<number>("colorInspector.autoScanMinutes", 0);
 
-    return this.htmlShell({
-      headerLeft,
-      headerMid,
-      headerRight,
-      imports,
-      groups,
-      buttonLabel,
-      showImportsToggle: importsClickable,
-      autoScanMinutes,
-    });
+    const startOpen = vscode.workspace
+  .getConfiguration()
+  .get<boolean>("colorInspector.themeGroupsStartOpen", false);
+
+return this.htmlShell({
+  headerLeft,
+  headerMid,
+  headerRight,
+  imports,
+  groups,
+  buttonLabel,
+  showImportsToggle: importsClickable,
+  autoScanMinutes,
+  themeGroupsStartOpen: vscode.workspace
+    .getConfiguration()
+    .get<boolean>("colorInspector.themeGroupsStartOpen", false),
+});
+  }
+
+  private themeIconsHtml(info: ThemeInfo): string {
+    const iconWrap = (svg: string, title: string) =>
+      `<span class="ticon" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${svg}</span>`;
+
+    const themeIconStyle = `style="width:12px;height:12px;display:block"`;
+
+    const lightSvg = `
+<svg ${themeIconStyle} viewBox="0 0 512 512" aria-hidden="true">
+  <path fill="currentColor" d="M361.5 1.2c5 2.1 8.6 6.6 9.6 11.9L391 121l107.9 19.8c5.3 1 9.8 4.6 11.9 9.6s1.5 10.7-1.6 15.2L446.9 256l62.3 90.3c3.1 4.5 3.7 10.2 1.6 15.2s-6.6 8.6-11.9 9.6L391 391 371.1 498.9c-1 5.3-4.6 9.8-9.6 11.9s-10.7 1.5-15.2-1.6L256 446.9l-90.3 62.3c-4.5 3.1-10.2 3.7-15.2 1.6s-8.6-6.6-9.6-11.9L121 391 13.1 371.1c-5.3-1-9.8-4.6-11.9-9.6s-1.5-10.7 1.6-15.2L65.1 256 2.8 165.7c-3.1-4.5-3.7-10.2-1.6-15.2s6.6-8.6 11.9-9.6L121 121 140.9 13.1c1-5.3 4.6-9.8 9.6-11.9s10.7-1.5 15.2 1.6L256 65.1 346.3 2.8c4.5-3.1 10.2-3.7 15.2-1.6zM160 256a96 96 0 1 1 192 0 96 96 0 1 1 -192 0zm224 0a128 128 0 1 0 -256 0 128 128 0 1 0 256 0z"/>
+</svg>`.trim();
+
+    const systemSvg = `
+<svg ${themeIconStyle} viewBox="0 0 384 512" aria-hidden="true">
+  <path fill="currentColor" d="M223.5 32C100 32 0 132.3 0 256S100 480 223.5 480c60.6 0 115.5-24.2 155.8-63.4c5-4.9 6.3-12.5 3.1-18.7s-10.1-9.7-17-8.5c-9.8 1.7-19.8 2.6-30.1 2.6c-96.9 0-175.5-78.8-175.5-176c0-65.8 36-123.1 89.3-153.3c6.1-3.5 9.2-10.5 7.7-17.3s-7.3-11.9-14.3-12.5c-6.3-.5-12.6-.8-19-.8z"/>
+</svg>`.trim();
+
+    const darkSvg = `
+<svg ${themeIconStyle} viewBox="0 0 576 512" aria-hidden="true">
+  <path fill="currentColor" d="M64 0C28.7 0 0 28.7 0 64L0 352c0 35.3 28.7 64 64 64l176 0-10.7 32L160 448c-17.7 0-32 14.3-32 32s14.3 32 32 32l256 0c17.7 0 32-14.3 32-32s-14.3-32-32-32l-69.3 0L336 416l176 0c35.3 0 64-28.7 64-64l0-288c0-35.3-28.7-64-64-64L64 0zM512 64l0 224L64 288 64 64l448 0z"/>
+</svg>`.trim();
+
+    const out: string[] = [];
+
+    // If there’s no explicit light-theme block but base exists, treat base as “Light Theme”.
+    const showLight = info.hasLight || info.hasBase;
+
+    if (showLight) out.push(iconWrap(lightSvg, "Light theme vars"));
+    if (info.hasDark) out.push(iconWrap(darkSvg, "Dark theme vars"));
+    if (info.supportsSystem) out.push(iconWrap(systemSvg, "System/Auto theme support"));
+
+    return out.length ? `<div class="ticons">${out.join("")}</div>` : "";
   }
 
   private htmlShell(args: {
@@ -402,16 +492,20 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
     headerMid: string;
     headerRight: string;
     imports: { file: string; colors: number }[];
-    groups: { file: string; count: number; hits: ColorHit[] }[];
+    groups: { file: string; count: number; hits: ColorHit[]; themeInfo: ThemeInfo }[];
     buttonLabel: string;
     showImportsToggle: boolean;
     autoScanMinutes: number;
+    themeGroupsStartOpen: boolean;
   }): string {
     const importsRows =
       args.imports.length === 0
         ? ""
         : args.imports
-            .map((i) => `<div class="importRow">${escapeHtml(i.file)} <span class="muted">(${i.colors})</span></div>`)
+            .map(
+              (i) =>
+                `<div class="importRow">${escapeHtml(i.file)} <span class="muted">(${i.colors})</span></div>`
+            )
             .join("");
 
     const groupsHtml =
@@ -419,12 +513,49 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
         ? `<div class="empty">No colors found.</div>`
         : args.groups
             .map((g) => {
-              const rows = g.hits.map((c, idx) => this.renderColorRow(c, `${g.file}::${idx}`)).join("");
+              // Theme grouping inside each file:
+              const darkVars = g.hits.filter((h) => h.kind === "var" && h.theme === "dark");
+              const lightVars = g.hits.filter((h) => h.kind === "var" && h.theme === "light");
+              const baseVars = g.hits.filter((h) => h.kind === "var" && h.theme === "base");
+              const literals = g.hits.filter((h) => h.kind === "literal");
+
+              const renderSection = (title: string, arr: ColorHit[], openByDefault: boolean) => {
+                if (arr.length === 0) {
+                  return "";
+                }
+                const rows = arr.map((c, idx) => this.renderColorRow(c, `${g.file}::${title}::${idx}`)).join("");
+
+                return `
+<details class="themeGroup" ${openByDefault ? "open" : ""}>
+  <summary class="themeSummary">
+    <span>${escapeHtml(title)} <span class="muted">(${arr.length})</span></span>
+    <span class="themeChevron">▸</span>
+  </summary>
+  <div class="themeBody">
+    ${rows}
+  </div>
+</details>`;
+              };
+
+              const hasExplicitLight = lightVars.length > 0;
+              const baseLabel = hasExplicitLight ? "Base" : "Light theme";
+
+              const body =
+                renderSection("Dark theme", darkVars, args.themeGroupsStartOpen) +
+                renderSection("Light theme", lightVars, args.themeGroupsStartOpen) +
+                renderSection(baseLabel, baseVars, args.themeGroupsStartOpen) +
+                renderSection("Other colors", literals, args.themeGroupsStartOpen);
+
+              const icons = this.themeIconsHtml(g.themeInfo);
+
               return `
 <div class="group">
-  <div class="groupHeader" title="${escapeHtml(g.file)}">${escapeHtml(g.file)} <span class="muted">(${g.count})</span></div>
+  <div class="groupHeader" title="${escapeHtml(g.file)}">
+    <div class="ghLeft">${escapeHtml(g.file)} <span class="muted">(${g.count})</span></div>
+    ${icons}
+  </div>
   <div class="groupBody">
-    ${rows}
+    ${body}
   </div>
 </div>`;
             })
@@ -447,7 +578,6 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
         ? `<div class="mutedSmall">Auto-scan: every ${Math.max(1, Math.min(10, Math.floor(args.autoScanMinutes)))} min</div>`
         : `<div class="mutedSmall">Auto-scan: off</div>`;
 
-    // NOTE: using your requested theme vars/styles
     return `<!doctype html>
 <html>
 <head>
@@ -549,6 +679,7 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
     }
 
     .group { border:1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius:12px; overflow:hidden; }
+
     .groupHeader {
       padding: 8px 10px;
       font-size: 12px;
@@ -556,10 +687,36 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
       background: color-mix(in srgb, CanvasText 5%, transparent);
       color: var(--vscode-sideBarSectionHeader-foreground);
       border-bottom: 1px solid var(--vscode-sideBar-border);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
     }
+
+    .ghLeft {
+      min-width:0;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+    }
+
+    .ticons{
+      display:flex;
+      gap:6px;
+      align-items:center;
+      flex:0 0 auto;
+      opacity:.85;
+    }
+    .ticon{
+  width:auto;
+  height:auto;
+  border:0;
+  background:transparent;
+  padding:0;
+}
+    .ticon:hover{ opacity:1; }
+
     .groupBody {
       padding: 10px;
       display: flex;
@@ -632,6 +789,40 @@ class ColorInspectorViewProvider implements vscode.WebviewViewProvider {
       gap: 10px;
       align-items: baseline;
     }
+
+    details.themeGroup {
+      border: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+      border-radius: 10px;
+      overflow: hidden;
+      background: color-mix(in srgb, CanvasText 2%, transparent);
+    }
+    details.themeGroup[open] {
+      background: color-mix(in srgb, CanvasText 3%, transparent);
+    }
+    summary.themeSummary {
+      list-style: none;
+      cursor: pointer;
+      padding: 8px 10px;
+      font-size: 11px;
+      font-weight: 900;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      user-select: none;
+    }
+    summary.themeSummary::-webkit-details-marker { display:none; }
+    .themeChevron { opacity: .75; font-weight: 900; }
+    details.themeGroup[open] .themeChevron { transform: rotate(90deg); }
+    .themeBody {
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      border-top: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+      background: var(--vscode-editor-background);
+    }
+
     .useLeft { font-weight: 700; opacity: .95; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .useRight { opacity: .75; white-space:nowrap; }
     .useSample { font-size: 11px; opacity: .8; white-space: nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -805,8 +996,7 @@ export function activate(context: vscode.ExtensionContext) {
   // Command: Scan/Refresh (manual trigger)
   context.subscriptions.push(
     vscode.commands.registerCommand("color-inspector.scan", async () => {
-      // Mark as scanned so button becomes Refresh and autoscan (if enabled) is allowed
-      (provider as any).hasScanned = true; // keep it simple; view provider handles UI state
+      (provider as any).hasScanned = true;
       await provider.render();
     })
   );
@@ -927,8 +1117,12 @@ async function openFileSelectRangeAndPickVscode(
 }
 
 /* -----------------------------
-   Helpers: scan colors + usages
+   Helpers: scan colors + usages (+ theme tagging for var definitions)
 ------------------------------ */
+
+function themeGroupsStartOpen(): boolean {
+  return vscode.workspace.getConfiguration().get<boolean>("colorInspector.themeGroupsStartOpen", false);
+}
 
 async function readUriText(uri: vscode.Uri): Promise<string> {
   const data = await vscode.workspace.fs.readFile(uri);
@@ -971,8 +1165,79 @@ function normalizeColorKey(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, "");
 }
 
+function computeThemeByLine(text: string): ThemeTag[] {
+  const lines = text.split(/\r?\n/);
+  const themeByLine: ThemeTag[] = new Array(lines.length).fill("base");
+
+  // stack values: theme for opened blocks, or null for "inherit"
+  const stack: Array<ThemeTag | null> = [];
+
+  const currentTheme = (): ThemeTag => {
+    for (let i = stack.length - 1; i >= 0; i--) {
+      const t = stack[i];
+      if (t) {
+        return t;
+      }
+    }
+    return "base";
+  };
+
+  const stripSameLineComments = (line: string): string => {
+    // cheap: remove /*...*/ on same line and trailing //...
+    return line.replace(/\/\*.*?\*\//g, "").replace(/\/\/.*$/g, "");
+  };
+
+  const detectThemeTrigger = (line: string): ThemeTag | null => {
+    const l = line.toLowerCase();
+
+    // @media (prefers-color-scheme: dark|light)
+    const media = l.match(/@media[^{]*prefers-color-scheme\s*:\s*(dark|light)/);
+    if (media) {
+      return media[1] === "dark" ? "dark" : "light";
+    }
+
+    // :root[data-theme-mode="dark|light"]
+    const rootAttr = l.match(/:root[^{]*data-theme-mode\s*=\s*["'](dark|light)["']/);
+    if (rootAttr) {
+      return rootAttr[1] === "dark" ? "dark" : "light";
+    }
+
+    return null;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i] ?? "";
+    const line = stripSameLineComments(raw);
+
+    themeByLine[i] = currentTheme();
+
+    const trigger = detectThemeTrigger(line);
+
+    const opens = (line.match(/{/g) ?? []).length;
+    const closes = (line.match(/}/g) ?? []).length;
+
+    for (let k = 0; k < opens; k++) {
+      if (k === 0 && trigger) {
+        stack.push(trigger);
+      } else {
+        stack.push(null);
+      }
+    }
+
+    for (let k = 0; k < closes; k++) {
+      if (stack.length > 0) {
+        stack.pop();
+      }
+    }
+  }
+
+  return themeByLine;
+}
+
 function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: string): ColorHit[] {
   const hits: ColorHit[] = [];
+
+  const themeByLine = computeThemeByLine(text);
 
   // Color formats
   const hexRegex = /#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b/g;
@@ -987,7 +1252,6 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
   const cssVarDefRegex = /--([A-Za-z0-9_-]+)\s*:\s*([^;]+)\s*;/g;
 
   // Track ranges of var-def values to avoid double-counting as literals
-  // key = `${line}:${startCol}:${endCol}:${normVal}`
   const varValueRangeKeys = new Set<string>();
 
   // First pass: variable definitions
@@ -1021,7 +1285,8 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
     const endCol = offsetToCol(lineStarts, endOffset);
     varValueRangeKeys.add(`${line}:${startCol}:${endCol}:${normalizeColorKey(value)}`);
 
-    // Usages: the definition itself isn’t a usage; we’ll compute usages later
+    const theme: ThemeTag = themeByLine[line0] ?? "base";
+
     hits.push({
       kind: "var",
       name: propName,
@@ -1029,6 +1294,7 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
       file,
       range: { line, startCol, endCol },
       usages: [],
+      theme,
     });
   }
 
@@ -1042,7 +1308,7 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
 
     const key = `${line}:${startCol}:${endCol}:${normalizeColorKey(value)}`;
     if (varValueRangeKeys.has(key)) {
-      return; // avoid duplicate where var def value matches literal at same spot
+      return;
     }
 
     hits.push({
@@ -1055,26 +1321,13 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
   };
 
   for (const m of text.matchAll(hexRegex)) {
-    const startOffset = m.index ?? 0;
-    addLiteralHit(m[0], startOffset);
+    addLiteralHit(m[0], m.index ?? 0);
   }
-
   for (const m of text.matchAll(rgbRegex)) {
-    const startOffset = m.index ?? 0;
-    addLiteralHit(m[0], startOffset);
+    addLiteralHit(m[0], m.index ?? 0);
   }
-
   for (const m of text.matchAll(hslRegex)) {
-    const startOffset = m.index ?? 0;
-    addLiteralHit(m[0], startOffset);
-  }
-
-  // Build quick lookup for var names in this file so we can resolve var(...) usages
-  const varNames = new Set<string>();
-  for (const h of hits) {
-    if (h.kind === "var") {
-      varNames.add(h.name);
-    }
+    addLiteralHit(m[0], m.index ?? 0);
   }
 
   // Usage extraction (best-effort, line-based)
@@ -1089,7 +1342,7 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
     valueToHits.set(norm, arr);
   }
 
-  // Also map from var name -> hit indices
+  // Map from var name -> hit indices
   const varToHits = new Map<string, number[]>();
   for (let i = 0; i < hits.length; i++) {
     const h = hits[i];
@@ -1100,7 +1353,6 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
     }
   }
 
-  // Find scope: prefer CSS selector lines like ".x:hover {", else prefer className="x", else fallback to tag
   const findCssScopeNear = (lineIdx: number): string | undefined => {
     for (let i = lineIdx; i >= 0 && i >= lineIdx - 40; i--) {
       const t = lines[i].trim();
@@ -1115,7 +1367,6 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
   };
 
   const findJsxScopeNear = (lineIdx: number): string | undefined => {
-    // Search upwards for className="..." or className={'...'} or className={...}
     for (let i = lineIdx; i >= 0 && i >= lineIdx - 60; i--) {
       const t = lines[i];
       const m1 = t.match(/\bclassName\s*=\s*["']([^"']+)["']/);
@@ -1141,19 +1392,16 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
   };
 
   const findPropertyKeyOnLine = (lineText: string): string | undefined => {
-    // CSS: "background: ..." or "box-shadow: ..."
     const cssProp = lineText.match(/^\s*([A-Za-z-]+)\s*:\s*/);
     if (cssProp && cssProp[1]) {
       return cssProp[1];
     }
 
-    // JSX inline style object: borderBottom: "1px solid var(--border)"
     const jsProp = lineText.match(/\b([A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*["']/);
     if (jsProp && jsProp[1]) {
       return jsProp[1];
     }
 
-    // JSX style object with var(...) without quotes sometimes: border: 1
     const jsProp2 = lineText.match(/\b([A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*[^,]+/);
     if (jsProp2 && jsProp2[1]) {
       return jsProp2[1];
@@ -1176,7 +1424,6 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
     const lineText = lines[li];
     const lineNo = li + 1;
 
-    // Literal usage checks
     const literalMatches = [
       ...lineText.matchAll(/#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b/g),
       ...lineText.matchAll(/\brgba?\(\s*[^)]+\)/g),
@@ -1185,14 +1432,11 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
 
     for (const mm of literalMatches) {
       const raw = (mm[0] ?? "").trim();
-      if (!raw) {
-        continue;
-      }
+      if (!raw) continue;
+
       const norm = normalizeColorKey(raw);
       const idxs = valueToHits.get(norm);
-      if (!idxs || idxs.length === 0) {
-        continue;
-      }
+      if (!idxs || idxs.length === 0) continue;
 
       const prop = findPropertyKeyOnLine(lineText) ?? "unknown";
       const scope = findCssScopeNear(li) ?? findJsxScopeNear(li) ?? "unknown";
@@ -1203,21 +1447,13 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
       }
     }
 
-    // var(--token) usage checks (for var-defined hits)
     const varMatches = [...lineText.matchAll(/var\(\s*(--[A-Za-z0-9_-]+)\s*\)/g)];
     for (const vm of varMatches) {
       const name = (vm[1] ?? "").trim();
-      if (!name) {
-        continue;
-      }
-      if (!varNames.has(name)) {
-        // Still record usage if we have a hit for it? If not defined in this file, it might be in another import.
-        // We’ll still try to attach by name if present.
-      }
+      if (!name) continue;
+
       const idxs = varToHits.get(name);
-      if (!idxs || idxs.length === 0) {
-        continue;
-      }
+      if (!idxs || idxs.length === 0) continue;
 
       const prop = findPropertyKeyOnLine(lineText) ?? "unknown";
       const scope = findCssScopeNear(li) ?? findJsxScopeNear(li) ?? "unknown";
@@ -1229,7 +1465,6 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
     }
   }
 
-  // Keep usages ordered + small
   for (const h of hits) {
     h.usages.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.scope.localeCompare(b.scope));
   }
@@ -1251,7 +1486,6 @@ function findImports(text: string): ImportSpec[] {
   const importBare = /\bimport\s+["']([^"']+)["']/g;
   const requireRe = /\brequire\(\s*["']([^"']+)["']\s*\)/g;
 
-  // Fixed cssImport regex (your broken one was from a copy/paste mangling)
   const cssImport = /@import\s+(?:url\(\s*)?["']([^"']+)["']\s*\)?/g;
 
   const add = (spec: string, kind: "js" | "css") => {
@@ -1262,34 +1496,19 @@ function findImports(text: string): ImportSpec[] {
     }
   };
 
-  for (const m of text.matchAll(importFrom)) {
-    add(m[1], "js");
-  }
-  for (const m of text.matchAll(importBare)) {
-    add(m[1], "js");
-  }
-  for (const m of text.matchAll(requireRe)) {
-    add(m[1], "js");
-  }
-  for (const m of text.matchAll(cssImport)) {
-    add(m[1], "css");
-  }
+  for (const m of text.matchAll(importFrom)) add(m[1], "js");
+  for (const m of text.matchAll(importBare)) add(m[1], "js");
+  for (const m of text.matchAll(requireRe)) add(m[1], "js");
+  for (const m of text.matchAll(cssImport)) add(m[1], "css");
 
   return results;
 }
 
 function isFollowable(spec: string, kind: "js" | "css"): boolean {
-  // explicit relative / common aliases
-  if (spec.startsWith("./") || spec.startsWith("../")) {
-    return true;
-  }
-  if (spec.startsWith("/")) {
-    return true;
-  }
-  if (spec.startsWith("@/") || spec.startsWith("~/")) {
-    return true;
-  }
-  // CSS often does relative-ish imports without ./ (best-effort)
+  if (spec.startsWith("./") || spec.startsWith("../")) return true;
+  if (spec.startsWith("/")) return true;
+  if (spec.startsWith("@/") || spec.startsWith("~/")) return true;
+
   if (kind === "css" && !spec.startsWith("http") && !spec.startsWith("data:")) {
     return true;
   }
@@ -1315,28 +1534,29 @@ function resolveWithExtensions(rawBase: vscode.Uri, specForExtTest: string): vsc
   return candidates;
 }
 
-function resolveImportCandidates(baseFile: vscode.Uri, wsRoot: vscode.Uri, spec: string, kind: "js" | "css"): vscode.Uri[] {
+function resolveImportCandidates(
+  baseFile: vscode.Uri,
+  wsRoot: vscode.Uri,
+  spec: string,
+  kind: "js" | "css"
+): vscode.Uri[] {
   const s = spec.trim();
 
-  // Absolute from workspace root
   if (s.startsWith("/")) {
     const without = s.replace(/^\/+/, "");
     return resolveWithExtensions(vscode.Uri.joinPath(wsRoot, without), s);
   }
 
-  // Alias "@/..." or "~//..."
   if (s.startsWith("@/") || s.startsWith("~/")) {
     const without = s.slice(2);
     return resolveWithExtensions(vscode.Uri.joinPath(wsRoot, without), s);
   }
 
-  // Relative
   if (s.startsWith("./") || s.startsWith("../")) {
     const baseDir = vscode.Uri.joinPath(baseFile, "..");
     return resolveWithExtensions(vscode.Uri.joinPath(baseDir, s), s);
   }
 
-  // CSS import without ./ is treated as relative to current file
   if (kind === "css") {
     const baseDir = vscode.Uri.joinPath(baseFile, "..");
     return resolveWithExtensions(vscode.Uri.joinPath(baseDir, s), s);
@@ -1361,14 +1581,10 @@ async function collectImportGraph(root: vscode.Uri, wsRoot: vscode.Uri, maxFiles
 
   while (queue.length > 0 && out.length < maxFiles) {
     const uri = queue.shift();
-    if (!uri) {
-      break;
-    }
+    if (!uri) break;
 
     const key = uri.toString();
-    if (visited.has(key)) {
-      continue;
-    }
+    if (visited.has(key)) continue;
 
     visited.add(key);
     out.push(uri);
@@ -1382,9 +1598,7 @@ async function collectImportGraph(root: vscode.Uri, wsRoot: vscode.Uri, maxFiles
 
     const imports = findImports(text);
     for (const imp of imports) {
-      if (!isFollowable(imp.spec, imp.kind)) {
-        continue;
-      }
+      if (!isFollowable(imp.spec, imp.kind)) continue;
 
       const candidates = resolveImportCandidates(uri, wsRoot, imp.spec, imp.kind);
       for (const c of candidates) {
@@ -1416,7 +1630,6 @@ function escapeHtml(s: string): string {
   });
 }
 
-// For attributes (same as HTML here; kept separate for clarity)
 function escapeHtmlAttr(s: string): string {
   return escapeHtml(s);
 }
