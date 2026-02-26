@@ -1,39 +1,55 @@
-# Contributing to Color Inspector
+Contributing to Color Inspector
 
-Thanks for wanting to help — collaboration is fully welcome.
+First of all — thank you.
+If you’re reading this, you’re already awesome.
 
-## Ways to contribute
-- Bug reports (with a minimal repro)
-- Parser improvements (regex or AST-based)
-- UI/UX improvements in the webview
-- Performance improvements (caching/incremental refresh)
-- Tests and fixtures for real-world cases
-- Documentation polish
+This project is intentionally open, hackable, and collaborative.
+It’s early. It’s evolving. And yes — contributions are very welcome.
 
-## Development setup
-1) Install deps:
-   npm install
+⸻
 
-2) Build:
-   npm run compile
+What kind of help do we want?
 
-3) Run:
-   Press F5 to launch an Extension Development Host
+Anything that makes the inspector smarter, cleaner, faster, or more accurate.
 
-## Code style and intent
-- Prefer clarity over cleverness
-- Avoid silent behavior changes (especially anything that edits user files)
-- Parser changes should come with a small repro snippet whenever possible
+Examples:
+	•	Improve JSX/TSX scope detection
+	•	Replace regex parsing with AST-based analysis
+	•	Improve import resolution
+	•	Reduce duplicate matches
+	•	Add performance improvements
+	•	Improve accessibility in the webview
+	•	Add tests (very welcome)
+	•	Improve documentation
 
-## Submitting a PR
-1) Fork the repo
-2) Create a branch: feature/my-change or fix/my-bug
-3) Commit with a clear message
-4) Open a PR describing what changed and why
+If it makes the extension better — it belongs here.
 
-## Reporting parsing issues
-Please include:
-- A minimal code snippet that fails
-- The language/file type (css/tsx/vue/etc)
-- What you expected vs what you got
-- Any relevant logs or screenshots
+⸻
+
+Development Setup
+	1.	Install dependencies:
+npm install
+	2.	Compile:
+npm run compile
+	3.	Press F5 to launch an Extension Development Host
+
+That’s it.
+
+⸻
+
+Philosophy
+	•	Prefer clarity over cleverness.
+	•	Avoid “magic” behavior.
+	•	Never silently modify user code.
+	•	If something edits code, it must ask first.
+
+The extension should feel predictable.
+
+⸻
+
+Pull Requests
+	•	Small and focused is better than huge and mysterious.
+	•	Explain why a change was made.
+	•	If you change parsing behavior, include a minimal code example.
+
+We’re building something useful — not mysterious.

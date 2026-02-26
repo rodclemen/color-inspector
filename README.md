@@ -1,5 +1,10 @@
 # 🎨 Color Inspector
 
+![Version](https://img.shields.io/badge/version-0.0.1-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Early Development](https://img.shields.io/badge/status-early--development-orange)
+![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)
+
 A focused VS Code extension that scans the active file and its explicit imports to find and organize color usage.
 
 No guessing. No magic crawling. Just what you actually imported.
@@ -25,6 +30,9 @@ If something doesn’t show up, it’s not you. It’s the parser.
 ---
 
 ## 🤝 Contributions Welcome
+
+This project is intentionally open and evolving.
+If you see something imperfect — that’s an invitation.
 
 I fully welcome collaboration.
 See CONTRIBUTING.md for dev setup and PR guidelines.
