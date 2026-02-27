@@ -933,8 +933,13 @@ return this.htmlShell({
   }
 
   private renderColorRow(c: ColorHit, key: string): string {
+    const cssProp = c.usages.find((u) => Object.keys(u).includes("prop"))?.prop;
+    const contextObj = c.usages.find((u)=>Object.keys(u).includes("scope"))?.scope;
+
     const labelLine = c.kind === "var" ? `<div class="label">Label: ${escapeHtml(c.name)}</div>` : "";
     const colorLine = `<div class="value">Color: ${escapeHtml(c.value)}</div>`;
+    const propertyKey = cssProp ? `<div class="value">Property key: ${escapeHtml(cssProp)}</div>` : "";
+    const contextHint = contextObj ? `<div class="value">Context hint {}: ${escapeHtml(contextObj)}</div>` : "";
     const lineLine = `<div class="line">Line: ${c.range.line}</div>`;
 
     const usageHtml =
@@ -962,7 +967,9 @@ return this.htmlShell({
      data-line="${c.range.line}"
      data-startcol="${c.range.startCol}"
      data-endcol="${c.range.endCol}"
-     data-value="${escapeHtml(c.value)}">
+     data-value="${escapeHtml(c.value)}"
+     data-property-key="${escapeHtml(propertyKey)}"
+     data-context-hint="${escapeHtml(contextHint)}">
 
   <button class="swatchBtn" title="Open VS Code color picker" aria-label="Open VS Code color picker">
     <div class="swatch" style="background:${escapeHtmlAttr(c.value)}"></div>
@@ -971,6 +978,8 @@ return this.htmlShell({
   <div class="meta">
     ${labelLine}
     ${colorLine}
+    ${propertyKey}
+    ${contextHint}
     ${lineLine}
   </div>
 
@@ -1367,28 +1376,64 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
   };
 
   const findJsxScopeNear = (lineIdx: number): string | undefined => {
-    for (let i = lineIdx; i >= 0 && i >= lineIdx - 60; i--) {
+    let componentName: string | undefined;
+    let selectorName: string | undefined; // nearest PascalCase JSX component (<Grid>)
+    let tagName: string | undefined;       // nearest lowercase HTML tag (<em>)
+    let className: string | undefined;
+
+    // Collect element-level context.
+    // PascalCase tags (<Grid>) and lowercase tags (<em>) are kept separate
+    // so both can appear in the context breadcrumb.
+    for (let i = lineIdx; i >= 0 && i >= lineIdx - 15; i--) {
       const t = lines[i];
-      const m1 = t.match(/\bclassName\s*=\s*["']([^"']+)["']/);
-      if (m1 && m1[1]) {
-        const first = m1[1].trim().split(/\s+/)[0];
-        if (first) {
-          return first.startsWith(".") ? first : `.${first}`;
+
+      if (
+        /(?:^|\s)(?:function|const|let|var)\s+[A-Z][A-Za-z0-9_]*\b/.test(t) ||
+        /export\s+(?:default\s+)?(?:function\s+)?[A-Z][A-Za-z0-9_]*\b/.test(t)
+      ) {
+        break;
+      }
+
+      if (!className) {
+        const m1 = t.match(/\bclassName\s*=\s*["']([^"']+)["']/);
+        const m2 = t.match(/\bclass\s*=\s*["']([^"']+)["']/);
+        const raw = m1?.[1] ?? m2?.[1];
+        if (raw) {
+          const first = raw.trim().split(/\s+/)[0];
+          className = first?.startsWith(".") ? first : `.${first}`;
         }
       }
-      const m2 = t.match(/\bclass\s*=\s*["']([^"']+)["']/);
-      if (m2 && m2[1]) {
-        const first = m2[1].trim().split(/\s+/)[0];
-        if (first) {
-          return first.startsWith(".") ? first : `.${first}`;
-        }
+
+      if (!selectorName) {
+        const mComp = t.match(/<([A-Z][A-Za-z0-9]*)\b/);
+        if (mComp?.[1]) selectorName = mComp[1];
       }
-      const mTag = t.match(/<\s*([A-Za-z][A-Za-z0-9:_-]*)\b/);
-      if (mTag && mTag[1]) {
-        return mTag[1];
+
+      if (!tagName) {
+        const mTag = t.match(/<([a-z][A-Za-z0-9-]*)\b/);
+        if (mTag?.[1]) tagName = mTag[1];
       }
     }
-    return undefined;
+
+    // Collect enclosing component/function name.
+    for (let i = lineIdx; i >= 0 && i >= lineIdx - 60; i--) {
+      const t = lines[i];
+
+      const mFn = t.match(/(?:^|\s)(?:function|const|let|var)\s+([A-Z][A-Za-z0-9_]*)\b/);
+      if (mFn?.[1]) { componentName = mFn[1]; break; }
+
+      const mArrow = t.match(/export\s+(?:default\s+)?(?:function\s+)?([A-Z][A-Za-z0-9_]*)\b/);
+      if (mArrow?.[1]) { componentName = mArrow[1]; break; }
+    }
+
+    // Build context breadcrumb: component > selector > class|tag, skipping missing parts.
+    // Omit selectorName if it matches componentName (avoids "Grid > Grid").
+    const parts = [
+      componentName,
+      selectorName !== componentName ? selectorName : undefined,
+      className ?? tagName,
+    ].filter(Boolean);
+    return parts.length > 0 ? parts.join(" > ") : undefined;
   };
 
   const findPropertyKeyOnLine = (lineText: string): string | undefined => {
@@ -1439,7 +1484,7 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
       if (!idxs || idxs.length === 0) continue;
 
       const prop = findPropertyKeyOnLine(lineText) ?? "unknown";
-      const scope = findCssScopeNear(li) ?? findJsxScopeNear(li) ?? "unknown";
+      const scope = findJsxScopeNear(li) ?? "unknown";
       const sample = lineText.trim().slice(0, 220);
 
       for (const hitIndex of idxs) {
@@ -1456,7 +1501,7 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
       if (!idxs || idxs.length === 0) continue;
 
       const prop = findPropertyKeyOnLine(lineText) ?? "unknown";
-      const scope = findCssScopeNear(li) ?? findJsxScopeNear(li) ?? "unknown";
+      const scope = findJsxScopeNear(li) ?? findCssScopeNear(li) ?? "unknown";
       const sample = lineText.trim().slice(0, 220);
 
       for (const hitIndex of idxs) {
