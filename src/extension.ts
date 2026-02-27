@@ -480,9 +480,9 @@ return this.htmlShell({
     // If there’s no explicit light-theme block but base exists, treat base as “Light Theme”.
     const showLight = info.hasLight || info.hasBase;
 
-    if (showLight) out.push(iconWrap(lightSvg, "Light theme vars"));
-    if (info.hasDark) out.push(iconWrap(darkSvg, "Dark theme vars"));
-    if (info.supportsSystem) out.push(iconWrap(systemSvg, "System/Auto theme support"));
+    if (showLight) {out.push(iconWrap(lightSvg, "Light theme vars"));}
+    if (info.hasDark) {out.push(iconWrap(darkSvg, "Dark theme vars"));}
+    if (info.supportsSystem) {out.push(iconWrap(systemSvg, "System/Auto theme support"));}
 
     return out.length ? `<div class="ticons">${out.join("")}</div>` : "";
   }
@@ -1432,11 +1432,11 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
 
     for (const mm of literalMatches) {
       const raw = (mm[0] ?? "").trim();
-      if (!raw) continue;
+      if (!raw) {continue;}
 
       const norm = normalizeColorKey(raw);
       const idxs = valueToHits.get(norm);
-      if (!idxs || idxs.length === 0) continue;
+      if (!idxs || idxs.length === 0) {continue;}
 
       const prop = findPropertyKeyOnLine(lineText) ?? "unknown";
       const scope = findCssScopeNear(li) ?? findJsxScopeNear(li) ?? "unknown";
@@ -1450,10 +1450,10 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
     const varMatches = [...lineText.matchAll(/var\(\s*(--[A-Za-z0-9_-]+)\s*\)/g)];
     for (const vm of varMatches) {
       const name = (vm[1] ?? "").trim();
-      if (!name) continue;
+      if (!name) {continue;}
 
       const idxs = varToHits.get(name);
-      if (!idxs || idxs.length === 0) continue;
+      if (!idxs || idxs.length === 0) {continue;}
 
       const prop = findPropertyKeyOnLine(lineText) ?? "unknown";
       const scope = findCssScopeNear(li) ?? findJsxScopeNear(li) ?? "unknown";
@@ -1496,18 +1496,18 @@ function findImports(text: string): ImportSpec[] {
     }
   };
 
-  for (const m of text.matchAll(importFrom)) add(m[1], "js");
-  for (const m of text.matchAll(importBare)) add(m[1], "js");
-  for (const m of text.matchAll(requireRe)) add(m[1], "js");
-  for (const m of text.matchAll(cssImport)) add(m[1], "css");
+  for (const m of text.matchAll(importFrom)) {add(m[1], "js");}
+  for (const m of text.matchAll(importBare)) {add(m[1], "js");}
+  for (const m of text.matchAll(requireRe)) {add(m[1], "js");}
+  for (const m of text.matchAll(cssImport)) {add(m[1], "css");}
 
   return results;
 }
 
 function isFollowable(spec: string, kind: "js" | "css"): boolean {
-  if (spec.startsWith("./") || spec.startsWith("../")) return true;
-  if (spec.startsWith("/")) return true;
-  if (spec.startsWith("@/") || spec.startsWith("~/")) return true;
+  if (spec.startsWith("./") || spec.startsWith("../")) {return true;}
+  if (spec.startsWith("/")) {return true;}
+  if (spec.startsWith("@/") || spec.startsWith("~/")) {return true;}
 
   if (kind === "css" && !spec.startsWith("http") && !spec.startsWith("data:")) {
     return true;
@@ -1581,10 +1581,10 @@ async function collectImportGraph(root: vscode.Uri, wsRoot: vscode.Uri, maxFiles
 
   while (queue.length > 0 && out.length < maxFiles) {
     const uri = queue.shift();
-    if (!uri) break;
+    if (!uri) {break;}
 
     const key = uri.toString();
-    if (visited.has(key)) continue;
+    if (visited.has(key)) {continue;}
 
     visited.add(key);
     out.push(uri);
@@ -1598,7 +1598,7 @@ async function collectImportGraph(root: vscode.Uri, wsRoot: vscode.Uri, maxFiles
 
     const imports = findImports(text);
     for (const imp of imports) {
-      if (!isFollowable(imp.spec, imp.kind)) continue;
+      if (!isFollowable(imp.spec, imp.kind)) {continue;}
 
       const candidates = resolveImportCandidates(uri, wsRoot, imp.spec, imp.kind);
       for (const c of candidates) {
