@@ -3,12 +3,12 @@
 > 🚧 Early development. Contributions welcome.
 
 ![License](https://img.shields.io/badge/license-MIT-green?cacheSeconds=86400)
-![Early Development](https://img.shields.io/badge/status-early--development-orange?cacheSeconds=86400)
-![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?cacheSeconds=86400)
-![Visual Studio Marketplace Version](https://img.shields.io/visual-studio-marketplace/v/rodclemen.color-inspector?cacheSeconds=7200)
-![Visual Studio Marketplace Installs](https://img.shields.io/visual-studio-marketplace/i/rodclemen.color-inspector?cacheSeconds=86400)
-![Visual Studio Marketplace Rating](https://img.shields.io/visual-studio-marketplace/r/rodclemen.color-inspector?cacheSeconds=86400)
-![Visual Studio Marketplace Downloads](https://img.shields.io/visual-studio-marketplace/d/rodclemen.color-inspector?cacheSeconds=86400)
+![Early Development](https://img.shields.io/badge/status-early--development-orange?cacheSeconds=186400)
+![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?cacheSeconds=186400)
+![Visual Studio Marketplace Version](https://img.shields.io/visual-studio-marketplace/v/rodclemen.color-inspector?cacheSeconds=9600)
+![Visual Studio Marketplace Installs](https://img.shields.io/visual-studio-marketplace/i/rodclemen.color-inspector?cacheSeconds=99400)
+![Visual Studio Marketplace Rating](https://img.shields.io/visual-studio-marketplace/r/rodclemen.color-inspector?cacheSeconds=99400)
+![Visual Studio Marketplace Downloads](https://img.shields.io/visual-studio-marketplace/d/rodclemen.color-inspector?cacheSeconds=99400)
 ![Color Inspector banner](media/banner.png)
 
 Track down every color in your codebase (via explicit imports). Swatches, copy-paste, jump-to-line, and usage — in the sidebar.
