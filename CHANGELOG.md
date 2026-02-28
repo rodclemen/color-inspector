@@ -7,7 +7,7 @@ Expect rough edges. That’s part of the fun.
 
 ---
 
-## [Unreleased] - 2026-02-28
+## [0.0.9] - 2026-02-28
 
 ### 🎨 Improved
 - JSX/TSX usage scope now shows a breadcrumb context like `"MyComponent > Card > .container"` instead of just the first tag name found. Distinguishes PascalCase JSX components from lowercase HTML tags, and stops walking up at component/function declaration boundaries.
