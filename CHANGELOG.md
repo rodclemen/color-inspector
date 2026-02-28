@@ -7,6 +7,16 @@ Expect rough edges. That’s part of the fun.
 
 ---
 
+## [Unreleased] - 2026-02-28
+
+### 🎨 Improved
+- JSX/TSX usage scope now shows a breadcrumb context like `"MyComponent > Card > .container"` instead of just the first tag name found. Distinguishes PascalCase JSX components from lowercase HTML tags, and stops walking up at component/function declaration boundaries.
+- `var(--x)` usage detection in JSX/TSX files now correctly prefers JSX scope over CSS scope, preventing inline style references from showing `"unknown"` when no CSS selector exists nearby.
+
+> _Based on PR #3 by [Chizaram-Igolo](https://github.com/Chizaram-Igolo) — applied selectively._
+
+---
+
 ## [0.0.6] - 2026-02-26
 
 ### ✨ Added
