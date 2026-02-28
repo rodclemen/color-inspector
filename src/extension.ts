@@ -1367,28 +1367,63 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
   };
 
   const findJsxScopeNear = (lineIdx: number): string | undefined => {
-    for (let i = lineIdx; i >= 0 && i >= lineIdx - 60; i--) {
+    let componentName: string | undefined;
+    let selectorName: string | undefined; // nearest PascalCase JSX component (<Grid>)
+    let tagName: string | undefined;       // nearest lowercase HTML tag (<em>)
+    let className: string | undefined;
+
+    // Collect element-level context within 15 lines.
+    // Stop early if we hit a component/function declaration boundary.
+    for (let i = lineIdx; i >= 0 && i >= lineIdx - 15; i--) {
       const t = lines[i];
-      const m1 = t.match(/\bclassName\s*=\s*["']([^"']+)["']/);
-      if (m1 && m1[1]) {
-        const first = m1[1].trim().split(/\s+/)[0];
-        if (first) {
-          return first.startsWith(".") ? first : `.${first}`;
+
+      if (
+        /(?:^|\s)(?:function|const|let|var)\s+[A-Z][A-Za-z0-9_]*\b/.test(t) ||
+        /export\s+(?:default\s+)?(?:function\s+)?[A-Z][A-Za-z0-9_]*\b/.test(t)
+      ) {
+        break;
+      }
+
+      if (!className) {
+        const m1 = t.match(/\bclassName\s*=\s*["']([^"']+)["']/);
+        const m2 = t.match(/\bclass\s*=\s*["']([^"']+)["']/);
+        const raw = m1?.[1] ?? m2?.[1];
+        if (raw) {
+          const first = raw.trim().split(/\s+/)[0];
+          className = first?.startsWith(".") ? first : `.${first}`;
         }
       }
-      const m2 = t.match(/\bclass\s*=\s*["']([^"']+)["']/);
-      if (m2 && m2[1]) {
-        const first = m2[1].trim().split(/\s+/)[0];
-        if (first) {
-          return first.startsWith(".") ? first : `.${first}`;
-        }
+
+      if (!selectorName) {
+        const mComp = t.match(/<([A-Z][A-Za-z0-9]*)\b/);
+        if (mComp?.[1]) {selectorName = mComp[1];}
       }
-      const mTag = t.match(/<\s*([A-Za-z][A-Za-z0-9:_-]*)\b/);
-      if (mTag && mTag[1]) {
-        return mTag[1];
+
+      if (!tagName) {
+        const mTag = t.match(/<([a-z][A-Za-z0-9-]*)\b/);
+        if (mTag?.[1]) {tagName = mTag[1];}
       }
     }
-    return undefined;
+
+    // Collect enclosing component/function name within 60 lines.
+    for (let i = lineIdx; i >= 0 && i >= lineIdx - 60; i--) {
+      const t = lines[i];
+
+      const mFn = t.match(/(?:^|\s)(?:function|const|let|var)\s+([A-Z][A-Za-z0-9_]*)\b/);
+      if (mFn?.[1]) { componentName = mFn[1]; break; }
+
+      const mExport = t.match(/export\s+(?:default\s+)?(?:function\s+)?([A-Z][A-Za-z0-9_]*)\b/);
+      if (mExport?.[1]) { componentName = mExport[1]; break; }
+    }
+
+    // Build breadcrumb: "Component > Selector > .class|tag", skipping missing parts.
+    // Omit selectorName if it duplicates componentName (avoids "Grid > Grid").
+    const parts = [
+      componentName,
+      selectorName !== componentName ? selectorName : undefined,
+      className ?? tagName,
+    ].filter(Boolean);
+    return parts.length > 0 ? parts.join(" > ") : undefined;
   };
 
   const findPropertyKeyOnLine = (lineText: string): string | undefined => {
@@ -1456,7 +1491,7 @@ function scanTextForColorsAndUsages(text: string, lineStarts: number[], file: st
       if (!idxs || idxs.length === 0) {continue;}
 
       const prop = findPropertyKeyOnLine(lineText) ?? "unknown";
-      const scope = findCssScopeNear(li) ?? findJsxScopeNear(li) ?? "unknown";
+      const scope = findJsxScopeNear(li) ?? findCssScopeNear(li) ?? "unknown";
       const sample = lineText.trim().slice(0, 220);
 
       for (const hitIndex of idxs) {
